@@ -75,21 +75,112 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
-class MLP(nn.Module):
-
+class Expert(nn.Module):
+    """Single expert network - same as original MLP"""
+    
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        
+        # Support different activation functions
+        activation = getattr(config, 'expert_activation', 'gelu')
+        if activation == 'swish':
+            self.activation = nn.SiLU()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        else:
+            self.activation = nn.GELU()
+            
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
+        
+        # Expert dropout - randomly drop entire expert during training
+        self.expert_dropout = getattr(config, 'expert_dropout', 0.0)
 
     def forward(self, x):
+        # Expert dropout - randomly disable entire expert
+        if self.training and self.expert_dropout > 0.0:
+            if torch.rand(1).item() < self.expert_dropout:
+                return torch.zeros_like(x)
+        
         x = self.c_fc(x)
-        x = self.gelu(x)
+        x = self.activation(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
+class MoE(nn.Module):
+    """Mixture of Experts implementation"""
+    
+    def __init__(self, config):
+        super().__init__()
+        self.num_experts = getattr(config, 'num_experts', 8)
+        self.top_k = getattr(config, 'top_k_experts', 2)
+        self.n_embd = config.n_embd
+        
+        # Create expert networks
+        self.experts = nn.ModuleList([Expert(config) for _ in range(self.num_experts)])
+        
+        # Gating network
+        self.gate = nn.Linear(config.n_embd, self.num_experts, bias=False)
+        
+        # Load balancing
+        self.load_balancing_loss_coef = getattr(config, 'load_balancing_loss_coef', 0.01)
+
+    def forward(self, x):
+        batch_size, seq_len, hidden_dim = x.shape
+        x_flat = x.view(-1, hidden_dim)  # (batch_size * seq_len, hidden_dim)
+        
+        # Compute gating scores
+        gate_logits = self.gate(x_flat)  # (batch_size * seq_len, num_experts)
+        gate_scores = F.softmax(gate_logits, dim=-1)
+        
+        # Select top-k experts
+        top_k_scores, top_k_indices = torch.topk(gate_scores, self.top_k, dim=-1)
+        top_k_scores = top_k_scores / top_k_scores.sum(dim=-1, keepdim=True)  # Renormalize
+        
+        # Initialize output
+        output = torch.zeros_like(x_flat)
+        
+        # Route to experts
+        for i in range(self.top_k):
+            expert_indices = top_k_indices[:, i]
+            expert_scores = top_k_scores[:, i:i+1]
+            
+            for expert_id in range(self.num_experts):
+                # Find tokens assigned to this expert
+                expert_mask = (expert_indices == expert_id)
+                if expert_mask.any():
+                    expert_input = x_flat[expert_mask]
+                    expert_output = self.experts[expert_id](expert_input)
+                    # Weight by gating score and add to output
+                    output[expert_mask] += expert_scores[expert_mask] * expert_output
+        
+        # Compute load balancing loss for training
+        if self.training:
+            # Fraction of tokens assigned to each expert
+            expert_counts = torch.zeros(self.num_experts, device=x.device)
+            for i in range(self.num_experts):
+                expert_counts[i] = (top_k_indices == i).float().sum()
+            
+            # Normalize by total assignments
+            expert_fractions = expert_counts / (batch_size * seq_len * self.top_k)
+            
+            # Average gating probability for each expert
+            gate_probs = gate_scores.mean(dim=0)
+            
+            # Load balancing loss: encourage uniform distribution
+            load_balancing_loss = self.num_experts * torch.sum(expert_fractions * gate_probs)
+            
+            # Store for use in training loop
+            if not hasattr(self, '_load_balancing_loss'):
+                self._load_balancing_loss = 0
+            self._load_balancing_loss += self.load_balancing_loss_coef * load_balancing_loss
+        
+        return output.view(batch_size, seq_len, hidden_dim)
+
+# Alias for backward compatibility
+MLP = MoE
 
 class Block(nn.Module):
 
@@ -98,11 +189,18 @@ class Block(nn.Module):
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.mlp = MoE(config)
+        self.gradient_checkpointing = False
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        if self.gradient_checkpointing and self.training:
+            # Use gradient checkpointing for memory efficiency
+            x = x + torch.utils.checkpoint.checkpoint(self.attn, self.ln_1(x), use_reentrant=False)
+            x = x + torch.utils.checkpoint.checkpoint(self.mlp, self.ln_2(x), use_reentrant=False)
+        else:
+            # Standard forward pass
+            x = x + self.attn(self.ln_1(x))
+            x = x + self.mlp(self.ln_2(x))
         return x
 
 @dataclass
@@ -114,6 +212,13 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    # MOE parameters
+    num_experts: int = 8 # Number of expert networks
+    top_k_experts: int = 2 # Number of experts to route each token to
+    load_balancing_loss_coef: float = 0.01 # Coefficient for load balancing loss
+    expert_dropout: float = 0.0 # Expert dropout rate for regularization
+    capacity_factor: float = 1.0 # Capacity factor for Switch Transformer
+    expert_activation: str = 'gelu' # Activation function for experts ('gelu', 'swish', 'relu')
 
 class GPT(nn.Module):
 
@@ -145,7 +250,12 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        num_params = self.get_num_params()
+        print("number of parameters: %.2fM" % (num_params/1e6,))
+        
+        # Report expert information for MoE
+        if hasattr(self.config, 'num_experts') and self.config.num_experts > 1:
+            print(f"MoE configuration: {self.config.num_experts} experts, top-{self.config.top_k_experts} routing")
 
     def get_num_params(self, non_embedding=True):
         """
@@ -173,6 +283,11 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
+        # Reset load balancing loss
+        for block in self.transformer.h:
+            if hasattr(block.mlp, '_load_balancing_loss'):
+                block.mlp._load_balancing_loss = 0
+
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
@@ -185,6 +300,14 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            
+            # Add load balancing loss from MoE
+            load_balancing_loss = 0
+            for block in self.transformer.h:
+                if hasattr(block.mlp, '_load_balancing_loss'):
+                    load_balancing_loss += block.mlp._load_balancing_loss
+            
+            loss = loss + load_balancing_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
@@ -328,3 +451,15 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing for memory efficiency"""
+        for block in self.transformer.h:
+            block.gradient_checkpointing = True
+        print("Gradient checkpointing enabled")
+    
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing"""
+        for block in self.transformer.h:
+            block.gradient_checkpointing = False
+        print("Gradient checkpointing disabled")
