@@ -141,6 +141,9 @@ def train_advanced_moe():
                         choices=['auto', 'v100', 'memory', 'performance', 'minimal', 'debug'])
     parser.add_argument('--profile', action='store_true', help='Enable detailed profiling')
     parser.add_argument('--monitor', action='store_true', help='Enable MoE monitoring')
+    parser.add_argument('--wandb', action='store_true', help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb-project', type=str, default='nanoGPT-MoE', help='W&B project name')
+    parser.add_argument('--wandb-run-name', type=str, default=None, help='W&B run name')
     args = parser.parse_args()
     
     # Load configuration
@@ -151,6 +154,40 @@ def train_advanced_moe():
     
     print(f"Using configuration: {args.config}")
     print(f"Config: {json.dumps(config, indent=2)}")
+    
+    # Initialize Weights & Biases if requested
+    wandb_run = None
+    if args.wandb and master_process:
+        try:
+            import wandb
+            
+            # Generate run name if not provided
+            run_name = args.wandb_run_name
+            if run_name is None:
+                run_name = f"{args.config}-{config['num_experts']}E-{config['n_layer']}L-{config['n_embd']}D"
+            
+            # Initialize wandb
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                config=config,
+                tags=[
+                    f"config-{args.config}",
+                    f"experts-{config['num_experts']}",
+                    f"layers-{config['n_layer']}",
+                    f"embedding-{config['n_embd']}",
+                    "MoE",
+                    "nanoGPT"
+                ]
+            )
+            print(f"Initialized W&B run: {wandb_run.name}")
+            
+        except ImportError:
+            print("WARNING: wandb not installed. Install with: pip install wandb")
+            args.wandb = False
+        except Exception as e:
+            print(f"WARNING: wandb initialization failed: {e}")
+            args.wandb = False
     
     # Setup distributed training
     ddp = int(os.environ.get('RANK', -1)) != -1
@@ -283,6 +320,18 @@ def train_advanced_moe():
             avg_val_loss = np.mean(val_losses)
             print(f"Step {step}: val_loss = {avg_val_loss:.4f}")
             
+            # Log validation metrics to wandb
+            if args.wandb and wandb_run:
+                try:
+                    wandb_metrics = {
+                        'val/loss': avg_val_loss,
+                        'val/perplexity': math.exp(avg_val_loss),
+                        'step': step
+                    }
+                    wandb.log(wandb_metrics)
+                except Exception as e:
+                    print(f"Warning: Failed to log validation metrics to wandb: {e}")
+                    
             # Save checkpoint if best
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -295,8 +344,49 @@ def train_advanced_moe():
                         'best_val_loss': best_val_loss
                     }
                     os.makedirs(config['out_dir'], exist_ok=True)
-                    torch.save(checkpoint, os.path.join(config['out_dir'], 'best_model.pt'))
+                    checkpoint_path = os.path.join(config['out_dir'], 'best_model.pt')
+                    torch.save(checkpoint, checkpoint_path)
                     
+                    # Log best model as wandb artifact
+                    if args.wandb and wandb_run:
+                        try:
+                            artifact = wandb.Artifact(
+                                name=f"best-model-step-{step}",
+                                type="model",
+                                description=f"Best model checkpoint at step {step} with val_loss {avg_val_loss:.4f}"
+                            )
+                            artifact.add_file(checkpoint_path)
+                            wandb.log_artifact(artifact)
+                            wandb.log({'best_val_loss': best_val_loss})
+                        except Exception as e:
+                            print(f"Warning: Failed to log best model artifact to wandb: {e}")
+                    
+            model.train()
+        
+        # Periodic checkpoint saving (every checkpoint_interval steps)
+        if step % config.get('checkpoint_interval', 5000) == 0 and step > 0 and master_process:
+            periodic_checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'config': config,
+                'step': step,
+                'best_val_loss': best_val_loss
+            }
+            os.makedirs(config['out_dir'], exist_ok=True)
+            periodic_checkpoint_path = os.path.join(config['out_dir'], f'checkpoint_step_{step}.pt')
+            torch.save(periodic_checkpoint, periodic_checkpoint_path)
+            
+            # Log periodic checkpoint to wandb
+            if args.wandb and wandb_run:
+                periodic_artifact = wandb.Artifact(
+                    name=f"checkpoint-step-{step}",
+                    type="checkpoint",
+                    description=f"Periodic checkpoint at step {step}"
+                )
+                periodic_artifact.add_file(periodic_checkpoint_path)
+                wandb.log_artifact(periodic_artifact)
+                print(f"Saved and logged periodic checkpoint at step {step}")
+            
             model.train()
         
         # Training step with gradient accumulation
@@ -365,6 +455,48 @@ def train_advanced_moe():
                   f"aux_loss {aux_loss.item():.6f}, lr {lr:.2e}, "
                   f"time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
             
+            # Log training metrics to wandb
+            if args.wandb and wandb_run:
+                try:
+                    train_metrics = {
+                        'train/loss': lossf,
+                        'train/main_loss': main_loss.item(),
+                        'train/aux_loss': aux_loss.item(),
+                        'train/perplexity': math.exp(lossf),
+                        'lr': lr,
+                        'mfu': running_mfu * 100,
+                        'timing/step_time_ms': dt * 1000,
+                        'step': step
+                    }
+                    
+                    # Add MoE-specific metrics if available
+                    if hasattr(raw_model, 'get_moe_stats'):
+                        moe_stats = raw_model.get_moe_stats()
+                        train_metrics.update({
+                            'moe/expert_usage_variance': moe_stats.get('expert_usage_variance', 0),
+                            'moe/avg_experts_per_token': moe_stats.get('avg_experts_per_token', config['top_k_experts']),
+                            'moe/load_balance_loss': aux_loss.item()
+                        })
+                    
+                    # Add GPU memory metrics if available
+                    if torch.cuda.is_available():
+                        gpu_memory_mb = torch.cuda.max_memory_allocated() / 1024**2
+                        gpu_memory_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+                        train_metrics['gpu/memory_allocated_mb'] = gpu_memory_mb
+                        train_metrics['gpu/memory_reserved_mb'] = gpu_memory_reserved_mb
+                        
+                        # Calculate memory efficiency
+                        if gpu_memory_reserved_mb > 0:
+                            train_metrics['gpu/memory_efficiency'] = (gpu_memory_mb / gpu_memory_reserved_mb) * 100
+                        
+                        # Reset peak memory tracking periodically
+                        if step % 1000 == 0:
+                            torch.cuda.reset_peak_memory_stats()
+                            
+                    wandb.log(train_metrics)
+                except Exception as e:
+                    print(f"Warning: Failed to log training metrics to wandb: {e}")
+            
             if monitor:
                 monitor.log_stats(step)
         
@@ -373,10 +505,61 @@ def train_advanced_moe():
     # Final reporting
     if master_process:
         print(f"\nTraining completed after {step} steps")
+        
+        # Log final training summary to wandb
+        if args.wandb and wandb_run:
+            try:
+                final_metrics = {
+                    'training/final_step': step,
+                    'training/best_val_loss': best_val_loss,
+                    'training/final_mfu': running_mfu * 100 if running_mfu > 0 else 0,
+                    'training/total_parameters': sum(p.numel() for p in model.parameters()),
+                    'training/trainable_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad)
+                }
+                
+                # Add model size info
+                raw_model = model.module if ddp else model
+                if hasattr(raw_model, 'get_num_params'):
+                    final_metrics['model/total_params'] = raw_model.get_num_params()
+                
+                wandb.log(final_metrics)
+                
+                # Save final model as artifact
+                final_checkpoint_path = os.path.join(config['out_dir'], 'final_model.pt')
+                final_checkpoint = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'config': config,
+                    'step': step,
+                    'best_val_loss': best_val_loss
+                }
+                torch.save(final_checkpoint, final_checkpoint_path)
+                
+                final_artifact = wandb.Artifact(
+                    name=f"final-model-step-{step}",
+                    type="model",
+                    description=f"Final model checkpoint after {step} training steps"
+                )
+                final_artifact.add_file(final_checkpoint_path)
+                wandb.log_artifact(final_artifact)
+                
+                print(f"Logged final model and metrics to W&B run: {wandb_run.name}")
+                wandb.finish()
+            except Exception as e:
+                print(f"Warning: Failed to log final metrics to wandb: {e}")
+                try:
+                    wandb.finish()
+                except:
+                    pass
+        
         if profiler:
             profiler.print_summary()
         if monitor:
             monitor.plot_stats(os.path.join(config['out_dir'], 'moe_stats.png'))
+            
+            # Log MoE stats plot to wandb if available
+            if args.wandb and os.path.exists(os.path.join(config['out_dir'], 'moe_stats.png')):
+                wandb.log({"moe_stats_plot": wandb.Image(os.path.join(config['out_dir'], 'moe_stats.png'))})
     
     if ddp:
         destroy_process_group()

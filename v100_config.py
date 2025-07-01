@@ -47,6 +47,7 @@ def get_v100_config():
         'eval_interval': 1000,
         'log_interval': 10,
         'eval_iters': 100,
+        'checkpoint_interval': 5000,  # Save checkpoint every 5000 steps
         
         # Checkpointing
         'always_save_checkpoint': True,
