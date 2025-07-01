@@ -3,6 +3,12 @@
 Simple test to verify the gradient checkpointing fix
 """
 
+import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 print("Testing gradient checkpointing fix...")
 
 # Test 1: Import the model

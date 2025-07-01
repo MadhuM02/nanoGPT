@@ -1,8 +1,14 @@
 """
 Memory testing script to find optimal configuration for your V100 setup
 """
+import os
+import sys
 import torch
 import gc
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from model import GPT, GPTConfig
 from v100_config import get_debug_config, get_minimal_config, get_memory_efficient_config, get_v100_config
 

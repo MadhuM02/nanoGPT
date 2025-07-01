@@ -2,6 +2,12 @@
 """
 Quick test of memory-optimized configurations
 """
+import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import torch
 from model import GPT, GPTConfig
 from v100_config import get_minimal_config, get_debug_config

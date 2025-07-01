@@ -1,6 +1,12 @@
 """
 Test the V100 configuration and advanced training setup
 """
+import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import sys
 import os
 

@@ -5,6 +5,12 @@ Creates a minimal checkpoint and tests loading/sampling
 """
 
 import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+import os
 import torch
 from model import GPTConfig, GPT
 

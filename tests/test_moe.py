@@ -3,7 +3,13 @@
 Test script for the MoE implementation with new parameters
 """
 
+import os
+import sys
 import torch
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from model import GPTConfig, GPT
 
 def test_moe():
