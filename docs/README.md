@@ -15,6 +15,7 @@ This directory contains all documentation for the nanoGPT Mixture-of-Experts imp
 ### 📖 User Guides (`guides/`)
 - **[SAMPLING_GUIDE.md](guides/SAMPLING_GUIDE.md)** - Complete guide to sampling from trained MoE models
 - **[OPTIMIZATION_GUIDE.md](guides/OPTIMIZATION_GUIDE.md)** - Performance optimization strategies and configurations
+- **[MODEL_ARCHITECTURE.md](guides/MODEL_ARCHITECTURE.md)** - Comprehensive model architecture guide with V100 configurations
 - **[TEST_ORGANIZATION.md](guides/TEST_ORGANIZATION.md)** - Guide to the test suite organization and usage
 
 ### 🔗 Integration (`integration/`)
@@ -25,6 +26,7 @@ This directory contains all documentation for the nanoGPT Mixture-of-Experts imp
 
 ### For Users
 - **New to sampling?** → [SAMPLING_GUIDE.md](guides/SAMPLING_GUIDE.md)
+- **Understanding the architecture?** → [MODEL_ARCHITECTURE.md](guides/MODEL_ARCHITECTURE.md)
 - **Performance issues?** → [OPTIMIZATION_GUIDE.md](guides/OPTIMIZATION_GUIDE.md)
 - **Want to track experiments?** → [WANDB_INTEGRATION.md](integration/WANDB_INTEGRATION.md)
 

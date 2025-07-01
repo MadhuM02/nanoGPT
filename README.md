@@ -216,6 +216,7 @@ Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started
 
 📚 **Comprehensive documentation is available in the [`docs/`](docs/) directory:**
 
+- **[docs/guides/MODEL_ARCHITECTURE.md](docs/guides/MODEL_ARCHITECTURE.md)** - Complete model architecture guide with V100 configurations
 - **[docs/guides/SAMPLING_GUIDE.md](docs/guides/SAMPLING_GUIDE.md)** - Complete guide to sampling from trained models
 - **[docs/guides/OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - Performance optimization strategies
 - **[docs/guides/TEST_ORGANIZATION.md](docs/guides/TEST_ORGANIZATION.md)** - Test suite organization and usage
@@ -223,6 +224,7 @@ Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started
 - **[docs/integration/](docs/integration/)** - Third-party integrations (Weights & Biases, etc.)
 
 🔗 **Quick Links:**
+- Understanding the model architecture? → [MODEL_ARCHITECTURE.md](docs/guides/MODEL_ARCHITECTURE.md)
 - Having checkpoint loading issues? → [CHECKPOINT_FIX.md](docs/fixes/CHECKPOINT_FIX.md)
 - Memory problems? → [OOM_SOLUTION.md](docs/fixes/OOM_SOLUTION.md)  
 - Want to track experiments? → [WANDB_INTEGRATION.md](docs/integration/WANDB_INTEGRATION.md)
