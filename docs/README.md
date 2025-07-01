@@ -8,14 +8,18 @@ This directory contains all documentation for the nanoGPT Mixture-of-Experts imp
 
 ### 🔧 Fixes & Solutions (`fixes/`)
 - **[CHECKPOINT_FIX.md](fixes/CHECKPOINT_FIX.md)** - Fixes for checkpoint loading with DDP/compilation prefixes
+- **[CHECKPOINT_LOADING_ENHANCEMENT.md](fixes/CHECKPOINT_LOADING_ENHANCEMENT.md)** - Enhanced checkpoint loading for advanced MoE training
+- **[CHECKPOINT_LOADING_IMPLEMENTATION.md](fixes/CHECKPOINT_LOADING_IMPLEMENTATION.md)** - Implementation details and troubleshooting
 - **[GRADIENT_CHECKPOINTING_FIX.md](fixes/GRADIENT_CHECKPOINTING_FIX.md)** - Gradient checkpointing implementation and fixes
 - **[OOM_SOLUTION.md](fixes/OOM_SOLUTION.md)** - Out-of-memory issue solutions and memory optimization
+- **[TRAIN_ADVANCED_FIX.md](fixes/TRAIN_ADVANCED_FIX.md)** - Fix for UnboundLocalError in advanced training script
 - **[FIX_SUMMARY.md](fixes/FIX_SUMMARY.md)** - Summary of all fixes applied to the codebase
 
 ### 📖 User Guides (`guides/`)
 - **[SAMPLING_GUIDE.md](guides/SAMPLING_GUIDE.md)** - Complete guide to sampling from trained MoE models
 - **[OPTIMIZATION_GUIDE.md](guides/OPTIMIZATION_GUIDE.md)** - Performance optimization strategies and configurations
 - **[MODEL_ARCHITECTURE.md](guides/MODEL_ARCHITECTURE.md)** - Comprehensive model architecture guide with V100 configurations
+- **[ADVANCED_TRAINING_ENHANCEMENTS.md](guides/ADVANCED_TRAINING_ENHANCEMENTS.md)** - Enhanced training script features and usage
 - **[TEST_ORGANIZATION.md](guides/TEST_ORGANIZATION.md)** - Guide to the test suite organization and usage
 
 ### 🔗 Integration (`integration/`)
@@ -27,11 +31,13 @@ This directory contains all documentation for the nanoGPT Mixture-of-Experts imp
 ### For Users
 - **New to sampling?** → [SAMPLING_GUIDE.md](guides/SAMPLING_GUIDE.md)
 - **Understanding the architecture?** → [MODEL_ARCHITECTURE.md](guides/MODEL_ARCHITECTURE.md)
+- **Using advanced training?** → [ADVANCED_TRAINING_ENHANCEMENTS.md](guides/ADVANCED_TRAINING_ENHANCEMENTS.md)
 - **Performance issues?** → [OPTIMIZATION_GUIDE.md](guides/OPTIMIZATION_GUIDE.md)
 - **Want to track experiments?** → [WANDB_INTEGRATION.md](integration/WANDB_INTEGRATION.md)
 
 ### For Developers
 - **Checkpoint loading issues?** → [CHECKPOINT_FIX.md](fixes/CHECKPOINT_FIX.md)
+- **Enhanced checkpoint features?** → [CHECKPOINT_LOADING_ENHANCEMENT.md](fixes/CHECKPOINT_LOADING_ENHANCEMENT.md)
 - **Memory problems?** → [OOM_SOLUTION.md](fixes/OOM_SOLUTION.md)
 - **Running tests?** → [TEST_ORGANIZATION.md](guides/TEST_ORGANIZATION.md)
 
