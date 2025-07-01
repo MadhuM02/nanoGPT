@@ -212,6 +212,22 @@ Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started
 - Additional logging around network health (e.g. gradient clip events, magnitudes)
 - Few more investigations around better init etc.
 
+## documentation
+
+📚 **Comprehensive documentation is available in the [`docs/`](docs/) directory:**
+
+- **[docs/guides/SAMPLING_GUIDE.md](docs/guides/SAMPLING_GUIDE.md)** - Complete guide to sampling from trained models
+- **[docs/guides/OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - Performance optimization strategies
+- **[docs/guides/TEST_ORGANIZATION.md](docs/guides/TEST_ORGANIZATION.md)** - Test suite organization and usage
+- **[docs/fixes/](docs/fixes/)** - Solutions for common issues (checkpoints, memory, etc.)
+- **[docs/integration/](docs/integration/)** - Third-party integrations (Weights & Biases, etc.)
+
+🔗 **Quick Links:**
+- Having checkpoint loading issues? → [CHECKPOINT_FIX.md](docs/fixes/CHECKPOINT_FIX.md)
+- Memory problems? → [OOM_SOLUTION.md](docs/fixes/OOM_SOLUTION.md)  
+- Want to track experiments? → [WANDB_INTEGRATION.md](docs/integration/WANDB_INTEGRATION.md)
+- Running tests? → [TEST_ORGANIZATION.md](docs/guides/TEST_ORGANIZATION.md)
+
 ## troubleshooting
 
 Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows). If you're running into related error messages try to disable this by adding `--compile=False` flag. This will slow down the code but at least it will run.
