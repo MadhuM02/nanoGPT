@@ -1,6 +1,7 @@
 """
 Advanced sampling script for MoE models
 Supports loading from various checkpoint formats and provides better error handling
+Enhanced with KV cache support for efficient generation
 """
 import os
 import pickle
@@ -9,6 +10,7 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+from kv_cache import add_kv_cache_support
 
 def find_checkpoint(out_dir, checkpoint_type='best'):
     """Find the appropriate checkpoint file in the output directory"""
@@ -112,6 +114,74 @@ def load_model_from_checkpoint(ckpt_path, device):
         print(f"Error loading checkpoint: {e}")
         raise
 
+def generate_with_kv_cache(model, idx, max_new_tokens, temperature=1.0, top_k=None, use_cache=True):
+    """
+    Enhanced generation with KV cache support for better efficiency
+    """
+    import torch.nn.functional as F
+    
+    if not use_cache:
+        # Fallback to original generate method
+        return model.generate(idx, max_new_tokens, temperature, top_k)
+    
+    # Ensure model has KV cache support
+    if not hasattr(model, 'forward_with_cache'):
+        print("Adding KV cache support to model...")
+        add_kv_cache_support(model)
+    
+    batch_size, seq_len = idx.shape
+    device = idx.device
+    
+    # Initialize KV cache state
+    past_key_values = None
+    current_pos = 0
+    
+    # First forward pass with the full prompt
+    with torch.no_grad():
+        if seq_len > 0:
+            logits, past_key_values = model.forward_with_cache(
+                idx, past_key_values, use_cache=True, start_pos=0
+            )
+            current_pos = seq_len
+        else:
+            # Empty prompt case
+            logits = None
+    
+    # Generate tokens one by one
+    for step in range(max_new_tokens):
+        if step == 0 and logits is not None:
+            # Use logits from prompt processing
+            next_logits = logits[:, -1, :] / temperature
+        else:
+            # Generate next token
+            last_token = idx[:, -1:] if idx.size(1) > 0 else torch.zeros((batch_size, 1), dtype=torch.long, device=device)
+            
+            # Forward pass for single token
+            logits, past_key_values = model.forward_with_cache(
+                last_token, past_key_values, use_cache=True, start_pos=current_pos
+            )
+            current_pos += 1
+            
+            next_logits = logits[:, -1, :] / temperature
+        
+        # Top-k filtering
+        if top_k is not None:
+            v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+            next_logits[next_logits < v[:, [-1]]] = -float('Inf')
+        
+        # Sample next token
+        probs = F.softmax(next_logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+        
+        # Append to sequence
+        idx = torch.cat((idx, idx_next), dim=1)
+        
+        # Stop if we hit max context length
+        if idx.size(1) >= model.config.block_size:
+            break
+    
+    return idx
+
 def setup_tokenizer(checkpoint):
     """Setup tokenizer based on checkpoint metadata"""
     # Try to load meta from checkpoint
@@ -164,6 +234,12 @@ def main():
                        help='Model dtype')
     parser.add_argument('--compile', action='store_true',
                        help='Compile model with PyTorch 2.0')
+    parser.add_argument('--use_kv_cache', action='store_true',
+                       help='Use KV cache for faster generation (experimental)')
+    parser.add_argument('--profile', action='store_true',
+                       help='Profile generation performance')
+    parser.add_argument('--batch_size', type=int, default=1,
+                       help='Batch size for generation')
     
     args = parser.parse_args()
     
@@ -184,6 +260,8 @@ def main():
         dtype = args.dtype
     
     print(f"Using device: {device}, dtype: {dtype}")
+    if args.use_kv_cache:
+        print("🚀 KV cache enabled for faster generation")
     
     # Set random seeds
     torch.manual_seed(args.seed)
@@ -227,11 +305,24 @@ def main():
     # Encode start prompt
     start_ids = encode(start)
     print(f"Prompt: '{start}' -> {len(start_ids)} tokens")
-    x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
+    
+    # Prepare batched input if needed
+    if args.batch_size > 1:
+        x = torch.tensor(start_ids, dtype=torch.long, device=device).unsqueeze(0)
+        x = x.repeat(args.batch_size, 1)
+        print(f"Batched input shape: {x.shape}")
+    else:
+        x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
     
     # Generate samples
-    print(f"\nGenerating {args.num_samples} samples...\n")
+    print(f"\nGenerating {args.num_samples} samples...")
+    if args.use_kv_cache:
+        print("Using KV cache for efficient generation")
     print("=" * 80)
+    
+    import time
+    total_tokens = 0
+    total_time = 0
     
     with torch.no_grad():
         with ctx:
@@ -239,17 +330,66 @@ def main():
                 print(f"Sample {k+1}:")
                 print("-" * 40)
                 
-                # Generate
-                y = model.generate(x, args.max_new_tokens, 
-                                 temperature=args.temperature, 
-                                 top_k=args.top_k)
+                # Generate with timing
+                start_time = time.time()
+                
+                if args.use_kv_cache:
+                    y = generate_with_kv_cache(
+                        model, x, args.max_new_tokens, 
+                        temperature=args.temperature, 
+                        top_k=args.top_k,
+                        use_cache=True
+                    )
+                else:
+                    y = model.generate(
+                        x, args.max_new_tokens, 
+                        temperature=args.temperature, 
+                        top_k=args.top_k
+                    )
+                
+                generation_time = time.time() - start_time
+                total_time += generation_time
                 
                 # Decode and print
-                generated_text = decode(y[0].tolist())
-                print(generated_text)
+                for batch_idx in range(y.size(0)):
+                    generated_text = decode(y[batch_idx].tolist())
+                    print(f"Batch {batch_idx + 1}:")
+                    print(generated_text)
+                    if batch_idx < y.size(0) - 1:
+                        print("-" * 20)
+                
+                # Performance metrics
+                tokens_generated = (y.size(1) - x.size(1)) * y.size(0)
+                total_tokens += tokens_generated
+                tokens_per_second = tokens_generated / generation_time
+                
+                if args.profile:
+                    print(f"\n📊 Performance metrics:")
+                    print(f"  Tokens generated: {tokens_generated}")
+                    print(f"  Time taken: {generation_time:.2f}s")
+                    print(f"  Tokens/second: {tokens_per_second:.1f}")
+                    if 'cuda' in device:
+                        print(f"  GPU memory: {torch.cuda.memory_allocated()/1024**2:.1f} MB")
+                
                 print("=" * 80)
     
-    print(f"\nGeneration complete! Generated {args.num_samples} samples with {args.max_new_tokens} max tokens each.")
+    # Final performance summary
+    if args.profile and total_time > 0:
+        avg_tokens_per_second = total_tokens / total_time
+        print(f"\n📈 Overall Performance Summary:")
+        print(f"  Total tokens generated: {total_tokens}")
+        print(f"  Total time: {total_time:.2f}s")
+        print(f"  Average tokens/second: {avg_tokens_per_second:.1f}")
+        print(f"  Cache strategy: {'KV cache' if args.use_kv_cache else 'Standard'}")
+        
+        if 'cuda' in device:
+            print(f"  Peak GPU memory: {torch.cuda.max_memory_allocated()/1024**2:.1f} MB")
+    
+    print(f"\n✅ Generation complete! Generated {args.num_samples} samples with {args.max_new_tokens} max tokens each.")
+    if args.use_kv_cache:
+        print("💡 KV cache was used for potentially faster generation.")
+    print("💡 Use --use_kv_cache for faster generation (when supported)")
+    print("💡 Use --profile to see detailed performance metrics")
 
 if __name__ == '__main__':
     main()
