@@ -150,16 +150,21 @@ def generate_with_kv_cache(model, idx, max_new_tokens, temperature=1.0, top_k=No
     # Generate tokens one by one
     for step in range(max_new_tokens):
         if step == 0 and logits is not None:
-            # Use logits from prompt processing
+            # Use logits from prompt processing for the first token
             next_logits = logits[:, -1, :] / temperature
         else:
-            # Generate next token
-            last_token = idx[:, -1:] if idx.size(1) > 0 else torch.zeros((batch_size, 1), dtype=torch.long, device=device)
+            # For subsequent tokens, use the last generated token as input
+            # The prompt has already been processed, so we only need the last token
+            next_token_input = idx[:, -1:] if step > 0 else idx
             
-            # Forward pass for single token
+            # Forward pass for a single token (or the full prompt if it was empty)
             logits, past_key_values = model.forward_with_cache(
-                last_token, past_key_values, use_cache=True, start_pos=current_pos
+                next_token_input, past_key_values, use_cache=True, start_pos=current_pos
             )
+            
+            # Update position for the next token
+            if step == 0:
+                current_pos = idx.size(1) # After processing prompt
             current_pos += 1
             
             next_logits = logits[:, -1, :] / temperature
