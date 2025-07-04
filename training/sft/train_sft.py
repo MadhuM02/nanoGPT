@@ -20,6 +20,14 @@ from torch.distributed import init_process_group, destroy_process_group
 # Add the parent directory to the path so we can import from the root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from model import GPTConfig, GPT
+from training.utils.checkpoint_utils import (
+    load_checkpoint_and_create_model, 
+    save_checkpoint, 
+    save_best_checkpoint,
+    load_optimizer_state,
+    get_model_info
+)
+from training.utils.sft_utils import create_sft_utilities
 
 # Set CUDA memory allocation configuration to reduce fragmentation
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -153,163 +161,8 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 # SFT data loader - reads complete examples
 data_dir = os.path.join('data', dataset)
 
-# Load examples once at startup
-train_examples = []
-val_examples = []
-
-# Initialize tokenizer once globally to avoid memory leaks
-import tiktoken
-enc = tiktoken.get_encoding("gpt2")
-
-def load_examples():
-    """Load all examples from text files"""
-    global train_examples, val_examples
-    
-    # Load training examples
-    train_path = os.path.join(data_dir, 'train.txt')
-    if os.path.exists(train_path):
-        with open(train_path, 'r', encoding='utf-8') as f:
-            train_examples = [line.strip() for line in f if line.strip()]
-    
-    # Load validation examples  
-    val_path = os.path.join(data_dir, 'val.txt')
-    if os.path.exists(val_path):
-        with open(val_path, 'r', encoding='utf-8') as f:
-            val_examples = [line.strip() for line in f if line.strip()]
-    
-    # Only master process should print to avoid spam in distributed training
-    if master_process:
-        print(f"📚 Loaded {len(train_examples)} training examples, {len(val_examples)} validation examples")
-
-def get_batch(split):
-    """Get a batch of complete examples for SFT training with instruction-response awareness"""
-    # Use global tokenizer to avoid repeated imports/creations
-    global enc
-    
-    # Choose examples based on split
-    examples = train_examples if split == 'train' else val_examples
-    
-    if len(examples) == 0:
-        # Fallback to binary data if text examples not available
-        if split == 'train':
-            data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-        else:
-            data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-        ix = torch.randint(len(data) - block_size, (batch_size,))
-        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-    else:
-        # Sample random examples
-        sampled_examples = np.random.choice(examples, size=batch_size, replace=True)
-        
-        x_list = []
-        y_list = []
-        instruction_masks = []  # Track instruction vs response regions
-        
-        for example in sampled_examples:
-            # Detect instruction-response boundary markers
-            # Common patterns: "Category:", "Sentiment:", "Summary:", etc.
-            response_markers = ["Category:", "Sentiment:", "Summary:", "Answer:", "Translation:", "Output:"]
-            
-            # Find the first response marker
-            instruction_end = -1
-            for marker in response_markers:
-                pos = example.find(marker)
-                if pos != -1:
-                    instruction_end = pos + len(marker)
-                    break
-            
-            # Tokenize the example
-            tokens = enc.encode_ordinary(example)
-            
-            # Find token boundary for instruction/response split
-            instruction_token_end = -1
-            if instruction_end > 0:
-                # Tokenize up to the instruction end to find token boundary
-                instruction_text = example[:instruction_end]
-                instruction_tokens = enc.encode_ordinary(instruction_text)
-                instruction_token_end = len(instruction_tokens)
-            
-            # Ensure we have at least one token
-            if len(tokens) == 0:
-                tokens = [enc.eot_token]
-            
-            # Add end token to mark end of sequence
-            tokens = tokens + [enc.eot_token]
-            
-            # Create instruction mask (1 for instruction, 0 for response)
-            instruction_mask = [1] * len(tokens)
-            if instruction_token_end > 0 and instruction_token_end < len(tokens):
-                # Mark response tokens
-                for i in range(instruction_token_end, len(tokens)):
-                    instruction_mask[i] = 0
-            
-            # Truncate or pad to exactly block_size
-            if len(tokens) >= block_size:
-                # Truncate to exactly block_size
-                tokens = tokens[:block_size]
-                instruction_mask = instruction_mask[:block_size]
-            else:
-                # Pad with end tokens to reach block_size
-                pad_length = block_size - len(tokens)
-                tokens = tokens + [enc.eot_token] * pad_length
-                instruction_mask = instruction_mask + [0] * pad_length  # Padding is response-like
-            
-            # Create input (x) and target (y) sequences
-            # x: tokens[:-1], y: tokens[1:]
-            # But we need both to be exactly block_size
-            x_tokens = tokens[:]  # Copy the full sequence
-            y_tokens = tokens[1:] + [enc.eot_token]  # Shift by 1 and add eot at end
-            
-            # Ensure exactly block_size for both
-            x_tokens = x_tokens[:block_size]
-            y_tokens = y_tokens[:block_size]
-            instruction_mask = instruction_mask[:block_size]
-            
-            # Final safety check - pad if somehow still short
-            while len(x_tokens) < block_size:
-                x_tokens.append(enc.eot_token)
-            while len(y_tokens) < block_size:
-                y_tokens.append(enc.eot_token)
-            while len(instruction_mask) < block_size:
-                instruction_mask.append(0)
-            
-            x_list.append(torch.tensor(x_tokens, dtype=torch.int64))
-            y_list.append(torch.tensor(y_tokens, dtype=torch.int64))
-            instruction_masks.append(torch.tensor(instruction_mask, dtype=torch.float32))
-        
-        x = torch.stack(x_list)
-        y = torch.stack(y_list)
-        instruction_mask_tensor = torch.stack(instruction_masks)
-        
-        # Create SFT loss mask: 0 for instruction tokens (no loss), 1 for response tokens (compute loss)
-        # instruction_mask: 1 for instruction, 0 for response
-        # loss_mask: 0 for instruction, 1 for response (inverted)
-        loss_mask = 1.0 - instruction_mask_tensor
-        
-        # Apply loss mask to targets: set instruction tokens to -1 (ignored in cross_entropy)
-        y_masked = y.clone()
-        y_masked[loss_mask == 0] = -1  # Mask out instruction tokens
-        
-        # Clean up intermediate lists to free memory
-        del x_list, y_list, instruction_masks
-    
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x = x.pin_memory().to(device, non_blocking=True)
-        y_masked = y_masked.pin_memory().to(device, non_blocking=True)
-        if len(examples) > 0:  # Only return loss_mask for SFT data
-            loss_mask = loss_mask.pin_memory().to(device, non_blocking=True)
-            return x, y_masked, loss_mask
-        else:
-            return x, y_masked  # For binary data fallback
-    else:
-        x, y_masked = x.to(device), y_masked.to(device)
-        if len(examples) > 0:
-            loss_mask = loss_mask.to(device)
-            return x, y_masked, loss_mask
-        else:
-            return x, y_masked
+# Initialize SFT utilities
+data_manager, loss_analyzer, training_utils = create_sft_utilities(data_dir)
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -328,7 +181,7 @@ if os.path.exists(meta_path):
         print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # Load SFT examples from text files
-load_examples()
+data_manager.load_examples(master_process)
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -338,116 +191,23 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   expert_dropout=expert_dropout, capacity_factor=capacity_factor,
                   expert_activation=expert_activation) # start with model_args from command line
 
-if init_from == 'scratch':
-    # init a new model from scratch
-    if master_process:
-        print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is None:
-        if master_process:
-            print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-elif init_from == 'resume':
-    if master_process:
-        print(f"Resuming training from {resume_from}")
-    # resume training from a checkpoint
-    ckpt_path = resume_from
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    
-    # Handle different checkpoint formats
-    if 'model_args' in checkpoint:
-        checkpoint_model_args = checkpoint['model_args']
-    elif 'config' in checkpoint:
-        checkpoint_model_args = checkpoint['config']
-    else:
-        raise ValueError("Cannot find model configuration in checkpoint")
-    
-    if master_process:
-        print(f"Checkpoint model args: {checkpoint_model_args}")
-    
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        if k in checkpoint_model_args:
-            model_args[k] = checkpoint_model_args[k]
-    # MoE specific parameters
-    for k in ['num_experts', 'top_k_experts', 'expert_activation']:
-        if k in checkpoint_model_args:
-            model_args[k] = checkpoint_model_args[k]
-    
-    # Ensure vocab_size is set - detect from the actual model weights
-    state_dict = checkpoint['model']
-    
-    # Check embedding layer size to infer vocab_size
-    for key in state_dict.keys():
-        if key.endswith('transformer.wte.weight') or key.endswith('lm_head.weight'):
-            checkpoint_vocab_size = state_dict[key].shape[0]
-            model_args['vocab_size'] = checkpoint_vocab_size
-            if master_process:
-                print(f"Detected vocab_size from checkpoint weights: {checkpoint_vocab_size}")
-            break
-    
-    # Fallback if we couldn't detect from weights
-    if 'vocab_size' not in model_args or model_args['vocab_size'] is None:
-        if 'vocab_size' in checkpoint_model_args and checkpoint_model_args['vocab_size'] is not None:
-            model_args['vocab_size'] = checkpoint_model_args['vocab_size']
-            if master_process:
-                print(f"Using checkpoint vocab_size: {model_args['vocab_size']}")
-        elif meta_vocab_size is not None:
-            model_args['vocab_size'] = meta_vocab_size
-            if master_process:
-                print(f"Using dataset vocab_size: {meta_vocab_size}")
-        else:
-            model_args['vocab_size'] = 50304  # Default GPT-2 vocab size
-            if master_process:
-                print(f"Using default vocab_size: 50304")
-    
-    if master_process:
-        print(f"Final model args: {model_args}")
-    
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    
-    # Now load the state dict
-    state_dict = checkpoint['model']
-    # fix the keys of the state dict :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefixes = ['module._orig_mod.', '_orig_mod.', 'module.']
-    for prefix in unwanted_prefixes:
-        keys_to_fix = [k for k in state_dict.keys() if k.startswith(prefix)]
-        if keys_to_fix:
-            if master_process:
-                print(f"Removing {len(keys_to_fix)} keys with prefix '{prefix}'")
-            for k in keys_to_fix:
-                new_key = k[len(prefix):]
-                state_dict[new_key] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    
-    # Handle different checkpoint formats for iteration tracking
-    if 'iter_num' in checkpoint:
-        iter_num = checkpoint['iter_num']
-    elif 'step' in checkpoint:
-        iter_num = checkpoint['step']
-    else:
-        iter_num = 0
-        
-    best_val_loss = checkpoint.get('best_val_loss', 1e9)
-elif init_from.startswith('gpt2'):
-    if master_process:
-        print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-    # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
-    # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = getattr(model.config, k)
-# crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+# Load model using checkpoint utility
+model, model_args, iter_num, best_val_loss, checkpoint = load_checkpoint_and_create_model(
+    init_from=init_from,
+    resume_from=resume_from,
+    model_args=model_args,
+    meta_vocab_size=meta_vocab_size,
+    device=device,
+    master_process=master_process,
+    block_size=block_size
+)
+
+# Log model information
+if master_process:
+    model_info = get_model_info(model)
+    print(f"✓ Model loaded: {model_info['total_parameters']:,} total params, "
+          f"{model_info['trainable_parameters']:,} trainable, "
+          f"{model_info['model_size_mb']:.1f}MB")
 
 # Ensure model is on the correct device and dtype before optimizer creation
 model.to(device)
@@ -487,12 +247,13 @@ if master_process:
 
 # optimizer - create after model is in final dtype
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume' and 'optimizer' in checkpoint:
-    # Skip optimizer loading to avoid dtype mismatches - start with fresh optimizer
-    if master_process:
-        print("⚠️  Skipping optimizer state loading to avoid dtype mismatches")
-        print("Starting with fresh optimizer state for fine-tuning")
-    iter_num = 0
+
+# Load optimizer state from checkpoint if available
+if init_from == 'resume' and checkpoint is not None:
+    optimizer_loaded = load_optimizer_state(checkpoint, optimizer, master_process, skip_on_dtype_mismatch=True)
+    if not optimizer_loaded:
+        iter_num = 0  # Reset iteration if optimizer couldn't be loaded
+
 checkpoint = None # free up memory
 
 # compile the model
@@ -527,156 +288,24 @@ if ddp:
         ddp = False
         master_process = True  # Reset master process for fallback
 
-# helps estimate an arbitrarily accurate loss over either split using many batches
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            batch_data = get_batch(split)
-            if len(batch_data) == 3:
-                X, Y, loss_mask = batch_data  # SFT data with loss mask
-            else:
-                X, Y = batch_data  # Binary data fallback
-                loss_mask = None
-            with ctx:
-                logits, loss = model(X, Y)
-            losses[k] = loss.item()
-            # Clean up intermediate tensors
-            del X, Y, logits, loss
-            if loss_mask is not None:
-                del loss_mask
-        out[split] = losses.mean()
-        # Clean up tensors
-        del losses
-    model.train()
-    return out
+# Create estimate loss function using utilities
+estimate_loss = training_utils.create_estimate_loss_fn(
+    model, data_manager, eval_iters, batch_size, block_size, device, device_type, ctx
+)
 
-# learning rate decay scheduler (cosine with warmup)
+# learning rate decay scheduler (cosine with warmup)  
 def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < warmup_iters:
-        return learning_rate * it / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+    return training_utils.get_cosine_lr_with_warmup(
+        it, learning_rate, warmup_iters, lr_decay_iters, min_lr
+    )
 
 # logging
 if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
-# Utility functions for detailed loss analysis and debugging
-def log_training_samples(X, Y, loss_per_sample=None, step=None, sample_limit=3):
-    """
-    Log detailed information about training samples to debug loss explosion
-    
-    Args:
-        X: Input tensor (batch_size, seq_len)
-        Y: Target tensor (batch_size, seq_len)
-        loss_per_sample: Optional per-sample losses
-        step: Current training step
-        sample_limit: Maximum number of samples to log (to avoid spam)
-    """
-    global enc
-    
-    if not master_process:  # Only log on master process
-        return
-        
-    batch_size, seq_len = X.shape
-    
-    print(f"\n📋 Sample Logging (Step {step}):")
-    print(f"   Batch shape: {X.shape}, Device: {X.device}")
-    print(f"   X range: [{X.min().item()}, {X.max().item()}]")
-    print(f"   Y range: [{Y.min().item()}, {Y.max().item()}]")
-    
-    # Log first few samples in detail
-    for i in range(min(sample_limit, batch_size)):
-        x_sample = X[i].cpu().numpy()
-        y_sample = Y[i].cpu().numpy()
-        
-        # Check for problematic values
-        x_invalid = np.sum((x_sample < 0) | (x_sample >= enc.n_vocab))
-        y_invalid = np.sum((y_sample < 0) | (y_sample >= enc.n_vocab))
-        
-        print(f"\n   Sample {i}:")
-        print(f"     X tokens: {x_sample[:10].tolist()}...{x_sample[-10:].tolist()}")
-        print(f"     Y tokens: {y_sample[:10].tolist()}...{y_sample[-10:].tolist()}")
-        print(f"     Invalid X tokens: {x_invalid}, Invalid Y tokens: {y_invalid}")
-        
-        if loss_per_sample is not None:
-            print(f"     Sample loss: {loss_per_sample[i].item():.4f}")
-        
-        # Try to decode samples (handle potential encoding errors)
-        try:
-            x_text = enc.decode(x_sample.tolist()[:50])  # First 50 tokens
-            y_text = enc.decode(y_sample.tolist()[:50])
-            print(f"     X text: {repr(x_text)}")
-            print(f"     Y text: {repr(y_text)}")
-        except Exception as e:
-            print(f"     Decode error: {e}")
-        
-        # Check for suspicious patterns
-        if len(np.unique(x_sample)) < 5:
-            print(f"     ⚠️  WARNING: X sample has very low diversity ({len(np.unique(x_sample))} unique tokens)")
-        if len(np.unique(y_sample)) < 5:
-            print(f"     ⚠️  WARNING: Y sample has very low diversity ({len(np.unique(y_sample))} unique tokens)")
-        
-        # Check for extremely repetitive patterns
-        if seq_len > 20:
-            # Check if first 10 tokens repeat
-            first_10 = x_sample[:10]
-            repeats = 0
-            for j in range(10, seq_len - 10, 10):
-                if np.array_equal(x_sample[j:j+10], first_10):
-                    repeats += 1
-            if repeats > seq_len // 20:  # More than 5% repetition
-                print(f"     ⚠️  WARNING: High repetition detected in X ({repeats} repeating blocks)")
-
-def compute_per_sample_loss(logits, targets):
-    """
-    Compute loss for each sample in the batch individually
-    
-    Args:
-        logits: Model output (batch_size, seq_len, vocab_size)
-        targets: Target tokens (batch_size, seq_len)
-    
-    Returns:
-        per_sample_losses: Tensor of shape (batch_size,)
-    """
-    batch_size, seq_len, vocab_size = logits.shape
-    
-    # Reshape for loss computation
-    logits_flat = logits.view(-1, vocab_size)  # (batch_size * seq_len, vocab_size)
-    targets_flat = targets.view(-1)  # (batch_size * seq_len,)
-    
-    # Compute loss for each token
-    token_losses = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1, reduction='none')
-    
-    # Reshape back to (batch_size, seq_len)
-    token_losses = token_losses.view(batch_size, seq_len)
-    
-    # Sum losses for each sample (ignoring -1 tokens)
-    per_sample_losses = []
-    for i in range(batch_size):
-        mask = targets[i] != -1
-        if mask.sum() > 0:
-            sample_loss = token_losses[i][mask].mean()
-        else:
-            sample_loss = torch.tensor(0.0, device=token_losses.device)
-        per_sample_losses.append(sample_loss)
-    
-    return torch.stack(per_sample_losses)
-
 # training loop
-batch_data = get_batch('train')  # fetch the very first batch
+batch_data = data_manager.get_batch('train', batch_size, block_size, device, device_type)  # fetch the very first batch
 if len(batch_data) == 3:
     X, Y, loss_mask = batch_data  # SFT data with loss mask
     using_sft_masking = True
@@ -716,20 +345,31 @@ while True:
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-                # Clean up checkpoint dict to free memory (only on master process)
-                del checkpoint
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # Save regular checkpoint
+                save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    model_args=model_args,
+                    iter_num=iter_num,
+                    best_val_loss=best_val_loss,
+                    config=config,
+                    out_dir=out_dir,
+                    checkpoint_name='ckpt.pt',
+                    master_process=master_process
+                )
+                
+                # Save best model checkpoint (without optimizer for deployment)
+                if losses['val'] < best_val_loss:
+                    save_best_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        model_args=model_args,
+                        iter_num=iter_num,
+                        val_loss=losses['val'],
+                        config=config,
+                        out_dir=out_dir,
+                        master_process=master_process
+                    )
     if iter_num == 0 and eval_only:
         break
 
@@ -749,7 +389,7 @@ while True:
             if master_process and (iter_num % log_interval == 0 or loss.item() > 10.0):
                 # Compute per-sample losses for detailed analysis
                 with torch.no_grad():
-                    per_sample_losses = compute_per_sample_loss(logits, Y)
+                    per_sample_losses = loss_analyzer.compute_per_sample_loss(logits, Y)
                     
                     # Log samples if loss is high or at regular intervals
                     if loss.item() > 10.0 or iter_num % (log_interval * 10) == 0:
@@ -764,7 +404,8 @@ while True:
                             print(f"   📊 Loss masking: {masked_tokens}/{total_tokens} tokens masked ({mask_ratio:.1f}%)")
                             print(f"   📊 Computing loss on {response_tokens} response tokens only")
                         
-                        log_training_samples(X, Y, per_sample_losses, iter_num, sample_limit=2)
+                        loss_analyzer.log_training_samples(X, Y, per_sample_losses, iter_num, 
+                                                         sample_limit=2, master_process=master_process)
                         
                         # Additional loss analysis
                         max_loss_idx = torch.argmax(per_sample_losses)
@@ -783,7 +424,7 @@ while True:
             
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        batch_data = get_batch('train')
+        batch_data = data_manager.get_batch('train', batch_size, block_size, device, device_type)
         if len(batch_data) == 3:
             X, Y, loss_mask = batch_data  # SFT data with loss mask
         else:
@@ -815,17 +456,14 @@ while True:
         lossf = loss.item() * gradient_accumulation_steps
         
         # Loss spike detection and recovery
-        if len(loss_history) > 0:
-            recent_avg_loss = sum(loss_history[-10:]) / min(len(loss_history), 10)
-            if lossf > recent_avg_loss * loss_spike_threshold and len(loss_history) >= 5:
-                print(f"⚠️  Loss spike detected! Current: {lossf:.4f}, Recent avg: {recent_avg_loss:.4f}")
-                print(f"🔧 Reducing learning rate temporarily...")
-                # Temporarily reduce learning rate
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= 0.1
-                # Force a CUDA cache cleanup to help with potential memory issues
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        if training_utils.detect_loss_spike(loss_history, lossf, loss_spike_threshold):
+            print(f"⚠️  Loss spike detected! Current: {lossf:.4f}, Recent avg: {sum(loss_history[-10:]) / min(len(loss_history), 10):.4f}")
+            print(f"🔧 Reducing learning rate temporarily...")
+            # Temporarily reduce learning rate
+            training_utils.apply_spike_recovery(optimizer, recovery_factor=0.1)
+            # Force a CUDA cache cleanup to help with potential memory issues
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         # Track loss history
         loss_history.append(lossf)

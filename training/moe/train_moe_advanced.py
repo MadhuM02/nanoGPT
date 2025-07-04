@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from model import GPTConfig, GPT
 from training.utils.v100_config import (get_v100_config, get_memory_efficient_config, get_performance_config,
                         get_minimal_config, get_debug_config, auto_select_config)
+from training.utils.checkpoint_utils import (
+    load_checkpoint_and_create_model, 
+    save_checkpoint, 
+    save_best_checkpoint,
+    load_optimizer_state,
+    get_model_info
+)
 from moe_monitor import MoEMonitor, GPUProfiler
 
 # -----------------------------------------------------------------------------
