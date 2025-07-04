@@ -9,10 +9,25 @@ import sys
 import subprocess
 import time
 
+def find_test_files():
+    """Find all test files in the organized directory structure"""
+    test_files = []
+    test_dir = os.path.dirname(os.path.dirname(__file__))  # Go up to tests/ directory
+    
+    # Search in all subdirectories for test files
+    for root, dirs, files in os.walk(test_dir):
+        for file in files:
+            if file.endswith('.py') and (file.startswith('test_') or file.startswith('minimal_')):
+                # Skip the fix_imports.py and other utility scripts
+                if file not in ['fix_imports.py', 'run_tests.py', 'organize_tests.py', 'update_test_imports.py']:
+                    test_files.append(os.path.join(root, file))
+    
+    return sorted(test_files)
+
 def run_test(test_file):
     """Run a single test file and return results"""
     print(f"\n{'='*60}")
-    print(f"Running {test_file}")
+    print(f"Running {os.path.relpath(test_file)}")
     print(f"{'='*60}")
     
     start_time = time.time()
@@ -50,20 +65,16 @@ def run_test(test_file):
         return False, 0
 
 def main():
-    print("nanoGPT MoE Test Suite")
+    print("nanoGPT Test Suite")
     print("=" * 40)
     
-    tests_dir = os.path.dirname(__file__)
-    
-    # Find all test files
-    test_files = []
-    for filename in sorted(os.listdir(tests_dir)):
-        if filename.startswith('test_') and filename.endswith('.py'):
-            test_files.append(filename)
+    # Find all test files in organized structure
+    test_files = find_test_files()
     
     print(f"Found {len(test_files)} test files:")
     for test_file in test_files:
-        print(f"  {test_file}")
+        rel_path = os.path.relpath(test_file)
+        print(f"  {rel_path}")
     
     # Run tests
     results = {}
@@ -90,7 +101,8 @@ def main():
     print(f"\nDetailed results:")
     for test_file, passed in results.items():
         status = "✅ PASS" if passed else "❌ FAIL"
-        print(f"  {test_file}: {status}")
+        rel_path = os.path.relpath(test_file)
+        print(f"  {rel_path}: {status}")
     
     if passed_count == total_count:
         print(f"\n🎉 All tests passed!")

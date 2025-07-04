@@ -234,6 +234,9 @@ def benchmark_moe_configurations():
         print(f"\nBenchmarking {config['name']}...")
         try:
             # Create model with this config
+            import sys
+            import os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
             from model import GPT, GPTConfig
             
             model_config = GPTConfig(

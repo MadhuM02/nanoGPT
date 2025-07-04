@@ -1,22 +1,116 @@
-# nanoGPT MoE Test Suite
+# nanoGPT Test Suite
 
-This directory contains all test scripts for the nanoGPT Mixture-of-Experts implementation.
+This directory contains all test scripts for nanoGPT, organized by functionality including MoE, SFT, KV Cache, and more.
 
-## 🚀 Quick Start
+## 📁 Directory Structure
 
-Run all tests:
+### `/sft/` - Supervised Fine-Tuning Tests
+- `test_sft_attention.py` - Tests SFT-specific attention mechanisms
+- `test_sft_attention_detailed.py` - Detailed SFT attention analysis
+- `test_sft_attention_simple.py` - Simplified SFT attention tests
+- `test_sft_data.py` - SFT data loading and preprocessing tests
+- `test_sft_loss_masking.py` - Tests loss masking for instruction vs response tokens
+- `minimal_sft_test.py` - Minimal SFT training test
+
+### `/kv_cache/` - KV Cache Tests
+- `test_kv_cache_fix.py` - Tests KV cache implementation fixes
+- `test_kv_quality.py` - Quality tests for KV cache
+- `minimal_kv_test.py` - Minimal KV cache functionality test
+- `debug_kv_step.py` - Step-by-step KV cache debugging
+- `test_generate_kv.py` - Tests text generation with KV cache
+
+### `/memory/` - Memory Management Tests
+- `test_memory.py` - Memory usage and leak tests
+- `test_tensor_fix.py` - Tensor memory management tests
+
+### `/moe/` - Mixture-of-Experts Tests
+- `test_moe.py` - MoE layer functionality tests
+
+### `/sampling/` - Text Generation and Sampling Tests
+- `test_sampling.py` - Text generation sampling tests
+- `test_prob_sampling.py` - Probability sampling algorithm tests
+
+### `/wandb/` - Weights & Biases Integration Tests
+- `test_wandb_logging.py` - W&B logging functionality tests
+- `demo_wandb.py` - W&B integration demo and examples
+
+### `/distributed/` - Distributed Training Tests
+- `test_distributed_minimal.sh` - Minimal distributed training test
+- `test_distributed_nccl.sh` - NCCL distributed training test
+- `test_minimal_distributed.sh` - Basic distributed setup test
+- `test_memory_configs.sh` - Memory configuration tests for distributed training
+
+### `/debug/` - Debug and Checkpoint Tests
+- `debug_checkpoint.py` - Checkpoint loading/saving debug utilities
+- `debug_checkpoint_advanced.py` - Advanced checkpoint debugging
+- `test_checkpoint.py` - Checkpoint functionality tests
+
+### `/analysis/` - Analysis and Profiling Scripts
+- `analyze_sft_attention.py` - SFT attention pattern analysis
+- `analyze_sft_attention_new.py` - Updated SFT attention analysis
+- `analyze_training_loss.py` - Training loss pattern analysis
+
+### `/utils/` - Test Utilities and Setup Scripts
+- `run_tests.py` - Main test runner script
+- `organize_tests.py` - Test organization utilities
+- `quick_test.py` - Quick functionality tests
+- `update_test_imports.py` - Test import management
+- `test_minimal.py` - Minimal functionality tests
+- `test_prefix_fix.py` - Prefix handling tests
+- `test_v100_setup.py` - V100 GPU setup tests
+
+## 🚀 How to Run All Tests
+
+### Option 1: Use the Test Runner (Recommended)
 ```bash
 cd tests
-python run_tests.py
+python utils/run_tests.py
 ```
 
-Run individual tests:
+### Option 2: Use pytest for Category-based Testing
 ```bash
 cd tests
-python test_moe.py           # Test basic MoE functionality
-python test_sampling.py      # Test sampling scripts
-python test_memory.py        # Test memory configurations
-python test_wandb_logging.py # Test wandb integration
+
+# Run all tests in all categories
+python -m pytest . -v
+
+# Run tests by category
+python -m pytest sft/ -v          # SFT tests only
+python -m pytest memory/ -v       # Memory tests only
+python -m pytest kv_cache/ -v     # KV cache tests only
+python -m pytest moe/ -v          # MoE tests only
+python -m pytest sampling/ -v     # Sampling tests only
+python -m pytest wandb/ -v        # W&B tests only
+```
+
+### Option 3: Run Individual Tests
+```bash
+cd tests
+
+# SFT tests
+python sft/test_sft_attention.py
+python sft/test_sft_loss_masking.py
+
+# Memory tests  
+python memory/test_memory.py
+
+# KV cache tests
+python kv_cache/test_kv_cache_fix.py
+
+# MoE tests
+python moe/test_moe.py
+
+# Sampling tests
+python sampling/test_sampling.py
+
+# W&B tests
+python wandb/test_wandb_logging.py
+```
+
+### Option 4: Quick Tests Only
+```bash
+cd tests
+python utils/quick_test.py        # Fast smoke tests
 ```
 
 ## 📋 Available Tests

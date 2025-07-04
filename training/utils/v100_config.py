@@ -51,7 +51,7 @@ def get_v100_config():
         
         # Checkpointing
         'always_save_checkpoint': True,
-        'out_dir': 'out-moe-v100',
+        'out_dir': 'checkpoints/out-moe-v100',
         
         # Distributed training
         'backend': 'nccl',
@@ -135,7 +135,7 @@ def get_minimal_config():
         'eval_iters': 20,
         
         'always_save_checkpoint': True,
-        'out_dir': 'out-moe-minimal',
+        'out_dir': 'checkpoints/out-moe-minimal',
         'backend': 'nccl',
     }
     return config
@@ -181,7 +181,7 @@ def get_debug_config():
         'eval_iters': 5,
         
         'always_save_checkpoint': False,
-        'out_dir': 'out-debug',
+        'out_dir': 'checkpoints/out-debug',
         'backend': 'nccl',
     }
     return config

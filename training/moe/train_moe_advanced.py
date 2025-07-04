@@ -4,6 +4,7 @@ Run with: python train_moe_advanced.py --config v100
 """
 
 import os
+import sys
 import time
 import math
 import pickle
@@ -15,8 +16,10 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+# Add the parent directory to the path so we can import from the root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from model import GPTConfig, GPT
-from v100_config import (get_v100_config, get_memory_efficient_config, get_performance_config,
+from training.utils.v100_config import (get_v100_config, get_memory_efficient_config, get_performance_config,
                         get_minimal_config, get_debug_config, auto_select_config)
 from moe_monitor import MoEMonitor, GPUProfiler
 

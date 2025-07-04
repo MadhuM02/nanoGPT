@@ -17,6 +17,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+import sys
 import time
 import math
 import pickle
@@ -27,12 +28,14 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+# Add the parent directory to the path so we can import from the root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
+out_dir = 'checkpoints/out'
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
@@ -81,7 +84,7 @@ dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported(
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+exec(open(os.path.join(os.path.dirname(__file__), '..', 'utils', 'configurator.py')).read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 

@@ -11,9 +11,9 @@ block_size = 128  # Very small context length to save memory
 # --- Model settings ---
 # Initialize from a pretrained model
 init_from = 'resume'  # Load weights from a checkpoint
-out_dir = 'out-sft-ultra-small'   # Output directory for ultra small SFT
+out_dir = 'checkpoints/out-sft-ultra-small'   # Output directory for ultra small SFT
 # Path to the pretrained checkpoint
-resume_from = 'out-moe-v100/best_model.pt'  # Use the best pretrained model
+resume_from = 'checkpoints/out-moe-v100/best_model.pt'  # Use the best pretrained model
 
 # --- Training settings ---
 eval_interval = 100   # Evaluate less frequently

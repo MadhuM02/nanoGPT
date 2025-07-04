@@ -6,8 +6,8 @@ Test the fixed checkpoint loading with problematic prefixes
 import os
 import sys
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add parent directory to path for imports (go up 2 levels from tests/utils/)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import os
 import torch

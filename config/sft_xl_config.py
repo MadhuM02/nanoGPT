@@ -49,7 +49,7 @@ eval_iters = 100
 eval_only = False
 
 # checkpointing
-out_dir = 'out-sft-xl'
+out_dir = 'checkpoints/out-sft-xl'
 checkpoint_interval = 2000
 always_save_checkpoint = True
 init_from = 'resume'  # Resume from existing checkpoint

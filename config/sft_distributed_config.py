@@ -10,9 +10,9 @@ block_size = 256  # Reduced context length to save memory
 # --- Model settings ---
 # Initialize from a pretrained model
 init_from = 'resume'  # Load weights from a checkpoint
-out_dir = 'out-sft-distributed'   # Output directory for distributed SFT
+out_dir = 'checkpoints/out-sft-distributed'   # Output directory for distributed SFT
 # Path to the pretrained checkpoint
-resume_from = 'out-moe-v100/best_model.pt'  # Use the best pretrained model
+resume_from = 'checkpoints/out-moe-v100/best_model.pt'  # Use the best pretrained model
 
 # --- Training settings ---
 eval_interval = 50   # Evaluate more frequently but with fewer examples

@@ -10,9 +10,9 @@ block_size = 256
 # --- Model settings ---
 # Initialize from a pretrained model
 init_from = 'resume'  # Load weights from a checkpoint
-out_dir = 'out-sft'   # Output directory for SFT checkpoints
+out_dir = 'checkpoints/out-sft'   # Output directory for SFT checkpoints
 # Path to the pretrained checkpoint
-resume_from = 'out-moe-v100/best_model.pt'  # Use the best pretrained model
+resume_from = 'checkpoints/out-moe-v100/best_model.pt'  # Use the best pretrained model
 # --- Training settings ---
 eval_interval = 250
 log_interval = 10

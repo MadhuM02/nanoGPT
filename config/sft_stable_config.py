@@ -11,8 +11,8 @@ block_size = 512  # Matches pretrained model
 
 # --- Model settings ---
 init_from = 'resume'
-out_dir = 'out-sft-stable'
-resume_from = 'out-moe-v100/best_model.pt'
+out_dir = 'checkpoints/out-sft-stable'
+resume_from = 'checkpoints/out-moe-v100/best_model.pt'
 
 # --- Training settings (PROVEN WORKING) ---
 eval_interval = 100  # Good balance

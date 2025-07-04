@@ -4,6 +4,7 @@ Based on train_moe_advanced.py but with configurator.py support
 """
 
 import os
+import sys
 import time
 import math
 import pickle
@@ -12,39 +13,28 @@ import json
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+# Add the parent directory to the path so we can import from the root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from model import GPTConfig, GPT
 
 # Set CUDA memory allocation configuration to reduce fragmentation
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
-import os
-import time
-import math
-import pickle
-from contextlib import nullcontext
-import json
-
-import numpy as np
-import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
-
-from model import GPTConfig, GPT
-
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out-sft'
+out_dir = 'checkpoints/out-sft'
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
-resume_from = 'out-moe-v100/best_model.pt'  # path to checkpoint to resume from
+resume_from = 'checkpoints/out-moe-v100/best_model.pt'  # path to checkpoint to resume from
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'nanoGPT-SFT'
@@ -87,7 +77,7 @@ dtype = 'float16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported(
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+exec(open(os.path.join(os.path.dirname(__file__), '..', 'utils', 'configurator.py')).read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -292,19 +282,34 @@ def get_batch(split):
         y = torch.stack(y_list)
         instruction_mask_tensor = torch.stack(instruction_masks)
         
-        # Store instruction mask for potential use in loss computation
-        # For now, we'll just clean up but could use this for weighted loss
-        del instruction_masks
+        # Create SFT loss mask: 0 for instruction tokens (no loss), 1 for response tokens (compute loss)
+        # instruction_mask: 1 for instruction, 0 for response
+        # loss_mask: 0 for instruction, 1 for response (inverted)
+        loss_mask = 1.0 - instruction_mask_tensor
+        
+        # Apply loss mask to targets: set instruction tokens to -1 (ignored in cross_entropy)
+        y_masked = y.clone()
+        y_masked[loss_mask == 0] = -1  # Mask out instruction tokens
         
         # Clean up intermediate lists to free memory
-        del x_list, y_list
+        del x_list, y_list, instruction_masks
     
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x = x.pin_memory().to(device, non_blocking=True)
+        y_masked = y_masked.pin_memory().to(device, non_blocking=True)
+        if len(examples) > 0:  # Only return loss_mask for SFT data
+            loss_mask = loss_mask.pin_memory().to(device, non_blocking=True)
+            return x, y_masked, loss_mask
+        else:
+            return x, y_masked  # For binary data fallback
     else:
-        x, y = x.to(device), y.to(device)
-    return x, y
+        x, y_masked = x.to(device), y_masked.to(device)
+        if len(examples) > 0:
+            loss_mask = loss_mask.to(device)
+            return x, y_masked, loss_mask
+        else:
+            return x, y_masked
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -530,12 +535,19 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            batch_data = get_batch(split)
+            if len(batch_data) == 3:
+                X, Y, loss_mask = batch_data  # SFT data with loss mask
+            else:
+                X, Y = batch_data  # Binary data fallback
+                loss_mask = None
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
             # Clean up intermediate tensors
             del X, Y, logits, loss
+            if loss_mask is not None:
+                del loss_mask
         out[split] = losses.mean()
         # Clean up tensors
         del losses
@@ -561,8 +573,123 @@ if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
+# Utility functions for detailed loss analysis and debugging
+def log_training_samples(X, Y, loss_per_sample=None, step=None, sample_limit=3):
+    """
+    Log detailed information about training samples to debug loss explosion
+    
+    Args:
+        X: Input tensor (batch_size, seq_len)
+        Y: Target tensor (batch_size, seq_len)
+        loss_per_sample: Optional per-sample losses
+        step: Current training step
+        sample_limit: Maximum number of samples to log (to avoid spam)
+    """
+    global enc
+    
+    if not master_process:  # Only log on master process
+        return
+        
+    batch_size, seq_len = X.shape
+    
+    print(f"\n📋 Sample Logging (Step {step}):")
+    print(f"   Batch shape: {X.shape}, Device: {X.device}")
+    print(f"   X range: [{X.min().item()}, {X.max().item()}]")
+    print(f"   Y range: [{Y.min().item()}, {Y.max().item()}]")
+    
+    # Log first few samples in detail
+    for i in range(min(sample_limit, batch_size)):
+        x_sample = X[i].cpu().numpy()
+        y_sample = Y[i].cpu().numpy()
+        
+        # Check for problematic values
+        x_invalid = np.sum((x_sample < 0) | (x_sample >= enc.n_vocab))
+        y_invalid = np.sum((y_sample < 0) | (y_sample >= enc.n_vocab))
+        
+        print(f"\n   Sample {i}:")
+        print(f"     X tokens: {x_sample[:10].tolist()}...{x_sample[-10:].tolist()}")
+        print(f"     Y tokens: {y_sample[:10].tolist()}...{y_sample[-10:].tolist()}")
+        print(f"     Invalid X tokens: {x_invalid}, Invalid Y tokens: {y_invalid}")
+        
+        if loss_per_sample is not None:
+            print(f"     Sample loss: {loss_per_sample[i].item():.4f}")
+        
+        # Try to decode samples (handle potential encoding errors)
+        try:
+            x_text = enc.decode(x_sample.tolist()[:50])  # First 50 tokens
+            y_text = enc.decode(y_sample.tolist()[:50])
+            print(f"     X text: {repr(x_text)}")
+            print(f"     Y text: {repr(y_text)}")
+        except Exception as e:
+            print(f"     Decode error: {e}")
+        
+        # Check for suspicious patterns
+        if len(np.unique(x_sample)) < 5:
+            print(f"     ⚠️  WARNING: X sample has very low diversity ({len(np.unique(x_sample))} unique tokens)")
+        if len(np.unique(y_sample)) < 5:
+            print(f"     ⚠️  WARNING: Y sample has very low diversity ({len(np.unique(y_sample))} unique tokens)")
+        
+        # Check for extremely repetitive patterns
+        if seq_len > 20:
+            # Check if first 10 tokens repeat
+            first_10 = x_sample[:10]
+            repeats = 0
+            for j in range(10, seq_len - 10, 10):
+                if np.array_equal(x_sample[j:j+10], first_10):
+                    repeats += 1
+            if repeats > seq_len // 20:  # More than 5% repetition
+                print(f"     ⚠️  WARNING: High repetition detected in X ({repeats} repeating blocks)")
+
+def compute_per_sample_loss(logits, targets):
+    """
+    Compute loss for each sample in the batch individually
+    
+    Args:
+        logits: Model output (batch_size, seq_len, vocab_size)
+        targets: Target tokens (batch_size, seq_len)
+    
+    Returns:
+        per_sample_losses: Tensor of shape (batch_size,)
+    """
+    batch_size, seq_len, vocab_size = logits.shape
+    
+    # Reshape for loss computation
+    logits_flat = logits.view(-1, vocab_size)  # (batch_size * seq_len, vocab_size)
+    targets_flat = targets.view(-1)  # (batch_size * seq_len,)
+    
+    # Compute loss for each token
+    token_losses = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1, reduction='none')
+    
+    # Reshape back to (batch_size, seq_len)
+    token_losses = token_losses.view(batch_size, seq_len)
+    
+    # Sum losses for each sample (ignoring -1 tokens)
+    per_sample_losses = []
+    for i in range(batch_size):
+        mask = targets[i] != -1
+        if mask.sum() > 0:
+            sample_loss = token_losses[i][mask].mean()
+        else:
+            sample_loss = torch.tensor(0.0, device=token_losses.device)
+        per_sample_losses.append(sample_loss)
+    
+    return torch.stack(per_sample_losses)
+
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+batch_data = get_batch('train')  # fetch the very first batch
+if len(batch_data) == 3:
+    X, Y, loss_mask = batch_data  # SFT data with loss mask
+    using_sft_masking = True
+else:
+    X, Y = batch_data  # Binary data fallback
+    loss_mask = None
+    using_sft_masking = False
+
+if master_process and using_sft_masking:
+    print("✅ Using SFT loss masking - only computing loss on response tokens")
+elif master_process:
+    print("⚠️  Using standard loss computation - computing loss on all tokens")
+
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -617,9 +744,51 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
+            
+            # Detailed logging for loss explosion debugging
+            if master_process and (iter_num % log_interval == 0 or loss.item() > 10.0):
+                # Compute per-sample losses for detailed analysis
+                with torch.no_grad():
+                    per_sample_losses = compute_per_sample_loss(logits, Y)
+                    
+                    # Log samples if loss is high or at regular intervals
+                    if loss.item() > 10.0 or iter_num % (log_interval * 10) == 0:
+                        print(f"\n🚨 DETAILED SAMPLE ANALYSIS - Loss: {loss.item():.4f}")
+                        
+                        # Show loss masking statistics
+                        if using_sft_masking and loss_mask is not None:
+                            total_tokens = Y.numel()
+                            masked_tokens = (Y == -1).sum().item()
+                            response_tokens = total_tokens - masked_tokens
+                            mask_ratio = masked_tokens / total_tokens * 100
+                            print(f"   📊 Loss masking: {masked_tokens}/{total_tokens} tokens masked ({mask_ratio:.1f}%)")
+                            print(f"   📊 Computing loss on {response_tokens} response tokens only")
+                        
+                        log_training_samples(X, Y, per_sample_losses, iter_num, sample_limit=2)
+                        
+                        # Additional loss analysis
+                        max_loss_idx = torch.argmax(per_sample_losses)
+                        min_loss_idx = torch.argmin(per_sample_losses)
+                        print(f"\n   Loss statistics:")
+                        print(f"     Mean per-sample loss: {per_sample_losses.mean().item():.4f}")
+                        print(f"     Max per-sample loss: {per_sample_losses.max().item():.4f} (sample {max_loss_idx})")
+                        print(f"     Min per-sample loss: {per_sample_losses.min().item():.4f} (sample {min_loss_idx})")
+                        print(f"     Loss std: {per_sample_losses.std().item():.4f}")
+                        
+                        # Check for NaN or inf in logits
+                        nan_count = torch.isnan(logits).sum().item()
+                        inf_count = torch.isinf(logits).sum().item()
+                        if nan_count > 0 or inf_count > 0:
+                            print(f"     ⚠️  CRITICAL: NaN count: {nan_count}, Inf count: {inf_count}")
+            
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        batch_data = get_batch('train')
+        if len(batch_data) == 3:
+            X, Y, loss_mask = batch_data  # SFT data with loss mask
+        else:
+            X, Y = batch_data  # Binary data fallback
+            loss_mask = None
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
         

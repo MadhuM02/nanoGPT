@@ -9,7 +9,7 @@ sft_head_specialization = True  # Enable attention head specialization (requires
 
 # Distributed training
 init_from = 'resume'  # 'resume' to continue training, 'gpt2*' for fine-tuning from GPT-2
-out_dir = 'out-sft-enhanced'
+out_dir = 'checkpoints/out-sft-enhanced'
 eval_interval = 200
 log_interval = 10
 eval_iters = 50

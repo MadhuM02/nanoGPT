@@ -13,7 +13,6 @@ docs/
 │   ├── OOM_SOLUTION.md                # Memory optimization solutions
 │   └── FIX_SUMMARY.md                 # Summary of all fixes
 ├── guides/                             # 📖 User guides and tutorials
-│   ├── MODEL_ARCHITECTURE.md          # Model architecture and V100 guide
 │   ├── SAMPLING_GUIDE.md              # Model sampling guide
 │   ├── OPTIMIZATION_GUIDE.md          # Performance optimization
 │   └── TEST_ORGANIZATION.md           # Test suite guide
@@ -34,7 +33,6 @@ docs/
 - ✅ `SAMPLING_GUIDE.md` → `docs/guides/SAMPLING_GUIDE.md`
 - ✅ `OPTIMIZATION_GUIDE.md` → `docs/guides/OPTIMIZATION_GUIDE.md`
 - ✅ `TEST_ORGANIZATION.md` → `docs/guides/TEST_ORGANIZATION.md`
-- ✅ `MODEL_ARCHITECTURE.md` → `docs/guides/MODEL_ARCHITECTURE.md` (newly created)
 
 ### From Root → `docs/integration/`
 - ✅ `WANDB_INTEGRATION.md` → `docs/integration/WANDB_INTEGRATION.md`
@@ -79,7 +77,7 @@ docs/
 | Category | Purpose | Files | Audience |
 |----------|---------|-------|----------|
 | **Fixes** | Bug fixes and solutions | 4 files | Developers experiencing issues |
-| **Guides** | How-to guides and tutorials | 4 files | All users |
+| **Guides** | How-to guides and tutorials | 3 files | All users |
 | **Integration** | Third-party integrations | 2 files | Users extending functionality |
 
 ## 🚀 Usage
@@ -100,7 +98,6 @@ ls docs/integration/  # Integrations
 
 ### Quick Navigation
 - **Need help with sampling?** → `docs/guides/SAMPLING_GUIDE.md`
-- **Understanding the architecture?** → `docs/guides/MODEL_ARCHITECTURE.md`
 - **Having checkpoint issues?** → `docs/fixes/CHECKPOINT_FIX.md`
 - **Want to optimize performance?** → `docs/guides/OPTIMIZATION_GUIDE.md`
 - **Memory problems?** → `docs/fixes/OOM_SOLUTION.md`

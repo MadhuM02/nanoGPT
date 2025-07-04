@@ -4,11 +4,15 @@ Supports loading from various checkpoint formats and provides better error handl
 Enhanced with KV cache support for efficient generation
 """
 import os
+import sys
 import pickle
 import argparse
 from contextlib import nullcontext
 import torch
 import tiktoken
+
+# Add the parent directory to the path so we can import from the root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from model import GPTConfig, GPT
 from kv_cache import add_kv_cache_support
 
@@ -215,7 +219,7 @@ def setup_tokenizer(checkpoint):
 
 def main():
     parser = argparse.ArgumentParser(description='Sample from a trained MoE model')
-    parser.add_argument('--out_dir', type=str, default='out-moe-v100', 
+    parser.add_argument('--out_dir', type=str, default='checkpoints/out-moe-v100', 
                        help='Output directory containing checkpoints')
     parser.add_argument('--checkpoint', type=str, default='best',
                        choices=['best', 'final', 'latest'], 
