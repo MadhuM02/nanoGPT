@@ -53,7 +53,7 @@ def run_quick_training():
         
         if result.returncode == 0:
             print("\n✅ Training completed successfully!")
-            print("🌐 Check your wandb dashboard to see the logged metrics and artifacts")
+            print("🌐 Check your wandb dashboard to see the logged metrics (artifacts disabled)")
         else:
             print(f"\n❌ Training failed with return code: {result.returncode}")
             

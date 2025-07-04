@@ -79,7 +79,7 @@ If you don't specify a run name, one will be auto-generated based on your config
 
 ## Artifacts (Model Checkpoints)
 
-The integration automatically logs model checkpoints as wandb artifacts:
+The integration logs training metrics to WandB. Model checkpoints are saved locally but artifact logging is disabled to reduce storage costs and upload time.
 
 ### Best Model Checkpoints
 - **Type:** `model`

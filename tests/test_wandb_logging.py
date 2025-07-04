@@ -127,7 +127,8 @@ def test_wandb_logging():
         description="Best model checkpoint at step 80 with val_loss 1.234"
     )
     best_artifact.add_file(checkpoint_path)
-    wandb.log_artifact(best_artifact)
+    # wandb.log_artifact(best_artifact)  # Artifact logging disabled
+    print("Best model checkpoint saved (artifact logging disabled)")
     
     # Test periodic checkpoint artifact
     periodic_artifact = MockArtifact(
@@ -136,7 +137,8 @@ def test_wandb_logging():
         description="Periodic checkpoint at step 50"
     )
     periodic_artifact.add_file(checkpoint_path)
-    wandb.log_artifact(periodic_artifact)
+    # wandb.log_artifact(periodic_artifact)  # Artifact logging disabled
+    print("Periodic checkpoint saved (artifact logging disabled)")
     
     # Test final metrics
     print("\n--- Testing Final Metrics ---")
@@ -157,7 +159,8 @@ def test_wandb_logging():
         description="Final model checkpoint after 100 training steps"
     )
     final_artifact.add_file(checkpoint_path)
-    wandb.log_artifact(final_artifact)
+    # wandb.log_artifact(final_artifact)  # Artifact logging disabled
+    print("Final model checkpoint saved (artifact logging disabled)")
     
     # Finish run
     wandb.finish()

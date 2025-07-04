@@ -702,19 +702,12 @@ def train_advanced_moe():
                     checkpoint_path = os.path.join(config['out_dir'], 'best_model.pt')
                     save_checkpoint(model, optimizer, config, step, best_val_loss, checkpoint_path, is_best=True)
                     
-                    # Log best model as wandb artifact
+                    # Log best validation loss to wandb (artifacts disabled)
                     if args.wandb and wandb_run:
                         try:
-                            artifact = wandb.Artifact(
-                                name=f"best-model-step-{step}",
-                                type="model",
-                                description=f"Best model checkpoint at step {step} with val_loss {avg_val_loss:.4f}"
-                            )
-                            artifact.add_file(checkpoint_path)
-                            wandb.log_artifact(artifact)
                             wandb.log({'best_val_loss': best_val_loss})
                         except Exception as e:
-                            print(f"Warning: Failed to log best model artifact to wandb: {e}")
+                            print(f"Warning: Failed to log best validation loss to wandb: {e}")
                     
             model.train()
         
@@ -723,19 +716,13 @@ def train_advanced_moe():
             periodic_checkpoint_path = os.path.join(config['out_dir'], f'checkpoint_step_{step}.pt')
             save_checkpoint(model, optimizer, config, step, best_val_loss, periodic_checkpoint_path, is_best=False)
             
-            # Log periodic checkpoint to wandb
+            # Log periodic checkpoint info to wandb (artifacts disabled)
             if args.wandb and wandb_run:
                 try:
-                    periodic_artifact = wandb.Artifact(
-                        name=f"checkpoint-step-{step}",
-                        type="checkpoint",
-                        description=f"Periodic checkpoint at step {step}"
-                    )
-                    periodic_artifact.add_file(periodic_checkpoint_path)
-                    wandb.log_artifact(periodic_artifact)
-                    print(f"Saved and logged periodic checkpoint at step {step}")
+                    wandb.log({'checkpoint_step': step})
+                    print(f"Saved periodic checkpoint at step {step}")
                 except Exception as e:
-                    print(f"Warning: Failed to log periodic checkpoint to wandb: {e}")
+                    print(f"Warning: Failed to log checkpoint info to wandb: {e}")
             
             model.train()
         
@@ -874,19 +861,11 @@ def train_advanced_moe():
                 
                 wandb.log(final_metrics)
                 
-                # Save final model as artifact
+                # Save final model (artifacts disabled)
                 final_checkpoint_path = os.path.join(config['out_dir'], 'final_model.pt')
                 save_checkpoint(model, optimizer, config, step, best_val_loss, final_checkpoint_path, is_best=False)
                 
-                final_artifact = wandb.Artifact(
-                    name=f"final-model-step-{step}",
-                    type="model",
-                    description=f"Final model checkpoint after {step} training steps"
-                )
-                final_artifact.add_file(final_checkpoint_path)
-                wandb.log_artifact(final_artifact)
-                
-                print(f"Logged final model and metrics to W&B run: {wandb_run.name}")
+                print(f"Logged final metrics to W&B run: {wandb_run.name}")
                 wandb.finish()
             except Exception as e:
                 print(f"Warning: Failed to log final metrics to wandb: {e}")

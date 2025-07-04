@@ -174,3 +174,4 @@ def add_kv_cache_support(model):
     model._forward_block_with_cache = types.MethodType(_forward_block_with_cache, model)
 
     return model
+ 
