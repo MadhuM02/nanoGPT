@@ -41,15 +41,80 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        
+        # SFT-specific attention parameters
+        self.sft_mode = getattr(config, 'sft_mode', False)
+        self.instruction_weight = getattr(config, 'instruction_attention_weight', 1.5)
+        self.response_dampening = getattr(config, 'response_attention_dampening', 0.8)
+        self.sft_head_specialization = getattr(config, 'sft_head_specialization', False)
+        
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
+        
+        # Always register causal mask buffer for compatibility with SFT mode
+        # Even when flash attention is available, we might need manual attention for SFT
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                    .view(1, 1, config.block_size, config.block_size))
+    
+    def create_sft_attention_bias(self, B, T, instruction_positions, device):
+        """Create attention bias for SFT training with instruction-response awareness"""
+        if not self.sft_mode or instruction_positions is None:
+            return None
+            
+        # Create attention bias matrix
+        bias = torch.zeros(B, 1, T, T, device=device)
+        
+        for b in range(B):
+            if instruction_positions[b] is not None and instruction_positions[b] < T:
+                instr_end = instruction_positions[b]
+                
+                # Boost attention from response tokens to instruction tokens
+                bias[b, 0, instr_end:, :instr_end] = math.log(self.instruction_weight)
+                
+                # Dampen attention within response tokens (prevent over-focus on recent tokens)
+                bias[b, 0, instr_end:, instr_end:] = math.log(self.response_dampening)
+        
+        return bias
+    
+    def apply_head_specialization(self, att, instruction_positions, B, T):
+        """Apply head specialization for SFT if enabled"""
+        if not self.sft_head_specialization or instruction_positions is None:
+            return att
+            
+        # Safely divide heads into specialized roles
+        # Ensure we don't have issues with head count not divisible by 3
+        if self.n_head < 3:
+            # Not enough heads for specialization, skip
+            return att
+            
+        heads_per_role = max(1, self.n_head // 3)
+        instruction_heads = list(range(0, heads_per_role))
+        response_heads = list(range(heads_per_role, min(2 * heads_per_role, self.n_head)))
+        # context_heads get the remaining heads
+        
+        for b in range(B):
+            if instruction_positions[b] is not None and instruction_positions[b] < T:
+                instr_end = instruction_positions[b]
+                
+                # Instruction heads: focus on instruction understanding
+                for h in instruction_heads:
+                    if h < self.n_head:  # Safety check
+                        # Reduce response-to-response attention for instruction heads
+                        att[b, h, instr_end:, instr_end:] *= 0.5
+                
+                # Response heads: focus on response generation  
+                for h in response_heads:
+                    if h < self.n_head:  # Safety check
+                        # Reduce instruction-internal attention for response heads
+                        att[b, h, :instr_end, :instr_end] *= 0.7
+                        # Boost instruction-to-response attention for response heads
+                        att[b, h, instr_end:, :instr_end] *= 1.3
+        
+        return att
 
-    def forward(self, x):
+    def forward(self, x, instruction_positions=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -60,15 +125,48 @@ class CausalSelfAttention(nn.Module):
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            # For flash attention, we can't easily modify attention patterns
+            # Fall back to manual implementation for SFT mode
+            if self.sft_mode and instruction_positions is not None:
+                # Manual implementation with SFT modifications
+                att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+                
+                # Add SFT-specific attention bias
+                sft_bias = self.create_sft_attention_bias(B, T, instruction_positions, x.device)
+                if sft_bias is not None:
+                    att = att + sft_bias
+                
+                att = F.softmax(att, dim=-1)
+                
+                # Apply head specialization if enabled
+                att = self.apply_head_specialization(att, instruction_positions, B, T)
+                
+                att = self.attn_dropout(att)
+                y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            else:
+                # Standard flash attention for non-SFT mode
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            
+            # Add SFT-specific attention bias
+            if self.sft_mode:
+                sft_bias = self.create_sft_attention_bias(B, T, instruction_positions, x.device)
+                if sft_bias is not None:
+                    att = att + sft_bias
+            
             att = F.softmax(att, dim=-1)
+            
+            # Apply head specialization if enabled
+            if self.sft_mode:
+                att = self.apply_head_specialization(att, instruction_positions, B, T)
+            
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -192,14 +290,21 @@ class Block(nn.Module):
         self.mlp = MoE(config)
         self.gradient_checkpointing = False
 
-    def forward(self, x):
+    def forward(self, x, instruction_positions=None):
         if self.gradient_checkpointing and self.training:
             # Use gradient checkpointing for memory efficiency
-            x = x + torch.utils.checkpoint.checkpoint(self.attn, self.ln_1(x), use_reentrant=False)
+            # Note: checkpointing with instruction_positions requires lambda wrapper
+            if instruction_positions is not None:
+                x = x + torch.utils.checkpoint.checkpoint(
+                    lambda inp: self.attn(self.ln_1(inp), instruction_positions), 
+                    x, use_reentrant=False
+                )
+            else:
+                x = x + torch.utils.checkpoint.checkpoint(self.attn, self.ln_1(x), use_reentrant=False)
             x = x + torch.utils.checkpoint.checkpoint(self.mlp, self.ln_2(x), use_reentrant=False)
         else:
             # Standard forward pass
-            x = x + self.attn(self.ln_1(x))
+            x = x + self.attn(self.ln_1(x), instruction_positions)
             x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -219,6 +324,12 @@ class GPTConfig:
     expert_dropout: float = 0.0 # Expert dropout rate for regularization
     capacity_factor: float = 1.0 # Capacity factor for Switch Transformer
     expert_activation: str = 'gelu' # Activation function for experts ('gelu', 'swish', 'relu')
+    # SFT-specific parameters
+    sft_mode: bool = False # Enable SFT-specific attention patterns
+    instruction_attention_weight: float = 1.5 # Boost factor for instruction attention
+    response_attention_dampening: float = 0.8 # Dampening factor for response-to-response attention
+    sft_head_specialization: bool = False # Enable specialized attention heads for SFT
+    sft_position_bias: bool = False # Enable position-based attention bias for SFT
 
 class GPT(nn.Module):
 
@@ -277,7 +388,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, instruction_positions=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -293,7 +404,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, instruction_positions)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -463,3 +574,28 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             block.gradient_checkpointing = False
         print("Gradient checkpointing disabled")
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Custom load_state_dict to handle missing bias buffers from older checkpoints"""
+        
+        # Handle missing bias buffers that were added for SFT attention
+        missing_bias_keys = []
+        for name, param in self.named_buffers():
+            if 'attn.bias' in name and name not in state_dict:
+                missing_bias_keys.append(name)
+        
+        if missing_bias_keys:
+            print(f"Warning: Missing bias buffers in checkpoint: {missing_bias_keys}")
+            print("These will be initialized with default causal mask values.")
+            
+            # Create the missing bias buffers in the state dict
+            for key in missing_bias_keys:
+                # Extract the layer number and create appropriate bias
+                if 'transformer.h.' in key:
+                    # This is a transformer layer bias buffer
+                    block_size = self.config.block_size
+                    bias_value = torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size)
+                    state_dict[key] = bias_value
+        
+        # Now load with the potentially modified state_dict
+        return super().load_state_dict(state_dict, strict=strict)

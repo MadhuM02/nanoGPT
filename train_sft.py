@@ -1,5 +1,9 @@
 """
-Simport os
+SFT (Supervised Fine-Tuning) training script for MoE models
+Based on train_moe_advanced.py but with configurator.py support
+"""
+
+import os
 import time
 import math
 import pickle
@@ -14,9 +18,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from model import GPTConfig, GPT
 
 # Set CUDA memory allocation configuration to reduce fragmentation
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'd Fine-Tuning) training script for MoE models
-Based on train_moe_advanced.py but with configurator.py support
-"""
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import os
 import time
@@ -87,19 +89,15 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
-
-# Debug: Print key config values
-print(f"DEBUG: gradient_accumulation_steps = {gradient_accumulation_steps}")
-print(f"DEBUG: batch_size = {batch_size}")
-print(f"DEBUG: block_size = {block_size}")
-print(f"DEBUG: config file used: {config.get('config', 'default')}")
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 if ddp:
     try:
-        init_process_group(backend=backend)
+        # Initialize process group with timeout
+        import datetime
+        init_process_group(backend=backend, timeout=datetime.timedelta(minutes=30))
         ddp_rank = int(os.environ['RANK'])
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
         ddp_world_size = int(os.environ['WORLD_SIZE'])
@@ -194,7 +192,7 @@ def load_examples():
         print(f"📚 Loaded {len(train_examples)} training examples, {len(val_examples)} validation examples")
 
 def get_batch(split):
-    """Get a batch of complete examples for SFT training"""
+    """Get a batch of complete examples for SFT training with instruction-response awareness"""
     # Use global tokenizer to avoid repeated imports/creations
     global enc
     
@@ -216,10 +214,31 @@ def get_batch(split):
         
         x_list = []
         y_list = []
+        instruction_masks = []  # Track instruction vs response regions
         
         for example in sampled_examples:
+            # Detect instruction-response boundary markers
+            # Common patterns: "Category:", "Sentiment:", "Summary:", etc.
+            response_markers = ["Category:", "Sentiment:", "Summary:", "Answer:", "Translation:", "Output:"]
+            
+            # Find the first response marker
+            instruction_end = -1
+            for marker in response_markers:
+                pos = example.find(marker)
+                if pos != -1:
+                    instruction_end = pos + len(marker)
+                    break
+            
             # Tokenize the example
             tokens = enc.encode_ordinary(example)
+            
+            # Find token boundary for instruction/response split
+            instruction_token_end = -1
+            if instruction_end > 0:
+                # Tokenize up to the instruction end to find token boundary
+                instruction_text = example[:instruction_end]
+                instruction_tokens = enc.encode_ordinary(instruction_text)
+                instruction_token_end = len(instruction_tokens)
             
             # Ensure we have at least one token
             if len(tokens) == 0:
@@ -228,14 +247,23 @@ def get_batch(split):
             # Add end token to mark end of sequence
             tokens = tokens + [enc.eot_token]
             
+            # Create instruction mask (1 for instruction, 0 for response)
+            instruction_mask = [1] * len(tokens)
+            if instruction_token_end > 0 and instruction_token_end < len(tokens):
+                # Mark response tokens
+                for i in range(instruction_token_end, len(tokens)):
+                    instruction_mask[i] = 0
+            
             # Truncate or pad to exactly block_size
             if len(tokens) >= block_size:
                 # Truncate to exactly block_size
                 tokens = tokens[:block_size]
+                instruction_mask = instruction_mask[:block_size]
             else:
                 # Pad with end tokens to reach block_size
                 pad_length = block_size - len(tokens)
                 tokens = tokens + [enc.eot_token] * pad_length
+                instruction_mask = instruction_mask + [0] * pad_length  # Padding is response-like
             
             # Create input (x) and target (y) sequences
             # x: tokens[:-1], y: tokens[1:]
@@ -246,18 +274,27 @@ def get_batch(split):
             # Ensure exactly block_size for both
             x_tokens = x_tokens[:block_size]
             y_tokens = y_tokens[:block_size]
+            instruction_mask = instruction_mask[:block_size]
             
             # Final safety check - pad if somehow still short
             while len(x_tokens) < block_size:
                 x_tokens.append(enc.eot_token)
             while len(y_tokens) < block_size:
                 y_tokens.append(enc.eot_token)
+            while len(instruction_mask) < block_size:
+                instruction_mask.append(0)
             
             x_list.append(torch.tensor(x_tokens, dtype=torch.int64))
             y_list.append(torch.tensor(y_tokens, dtype=torch.int64))
+            instruction_masks.append(torch.tensor(instruction_mask, dtype=torch.float32))
         
         x = torch.stack(x_list)
         y = torch.stack(y_list)
+        instruction_mask_tensor = torch.stack(instruction_masks)
+        
+        # Store instruction mask for potential use in loss computation
+        # For now, we'll just clean up but could use this for weighted loss
+        del instruction_masks
         
         # Clean up intermediate lists to free memory
         del x_list, y_list
@@ -272,6 +309,8 @@ def get_batch(split):
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
+loss_history = []  # Track recent losses for spike detection
+loss_spike_threshold = 2.0  # If loss increases by this factor, it's a spike
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -464,7 +503,9 @@ if ddp:
         # Ensure model is in the right state before DDP wrapping
         if master_process:
             print(f"Wrapping model in DDP on device {ddp_local_rank}...")
-        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
+        # Use broadcast_buffers=False and find_unused_parameters=False for better performance
+        model = DDP(model, device_ids=[ddp_local_rank], 
+                   broadcast_buffers=False, find_unused_parameters=True)
         if master_process:
             print(f"✅ Model wrapped in DDP with device {ddp_local_rank}")
         
@@ -496,9 +537,8 @@ def estimate_loss():
             # Clean up intermediate tensors
             del X, Y, logits, loss
         out[split] = losses.mean()
-        # Force cleanup after each split (only on master process to avoid sync issues)
-        if torch.cuda.is_available() and master_process:
-            torch.cuda.empty_cache()
+        # Clean up tensors
+        del losses
     model.train()
     return out
 
@@ -536,15 +576,6 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        # Ensure all processes are synchronized before evaluation
-        if ddp:
-            try:
-                torch.distributed.barrier()
-            except Exception as e:
-                if master_process:
-                    print(f"Warning: Distributed barrier failed: {e}")
-                    print("Continuing without synchronization...")
-        
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
@@ -594,10 +625,6 @@ while True:
         
         # Clean up intermediate tensors to prevent memory accumulation
         del logits
-        if micro_step == gradient_accumulation_steps - 1:
-            # Force cleanup after the last micro step
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
     # clip the gradient
     if grad_clip != 0.0:
         if use_scaler:
@@ -617,6 +644,25 @@ while True:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
+        
+        # Loss spike detection and recovery
+        if len(loss_history) > 0:
+            recent_avg_loss = sum(loss_history[-10:]) / min(len(loss_history), 10)
+            if lossf > recent_avg_loss * loss_spike_threshold and len(loss_history) >= 5:
+                print(f"⚠️  Loss spike detected! Current: {lossf:.4f}, Recent avg: {recent_avg_loss:.4f}")
+                print(f"🔧 Reducing learning rate temporarily...")
+                # Temporarily reduce learning rate
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] *= 0.1
+                # Force a CUDA cache cleanup to help with potential memory issues
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        # Track loss history
+        loss_history.append(lossf)
+        if len(loss_history) > 50:  # Keep only recent history
+            loss_history.pop(0)
+        
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
@@ -625,13 +671,15 @@ while True:
         if torch.cuda.is_available() and master_process:
             memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+            current_lr = optimizer.param_groups[0]['lr']
             print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, "
-                  f"mem {memory_allocated:.2f}/{memory_reserved:.2f}GB")
+                  f"mem {memory_allocated:.2f}/{memory_reserved:.2f}GB, lr {current_lr:.2e}")
         elif master_process:
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, lr {current_lr:.2e}")
         
-        # Force cleanup every 10 steps to prevent memory accumulation (all processes)
-        if iter_num % 10 == 0 and torch.cuda.is_available():
+        # Less frequent cleanup to avoid interfering with NCCL communications
+        if iter_num % 50 == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
     iter_num += 1
     local_iter_num += 1

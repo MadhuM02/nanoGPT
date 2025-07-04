@@ -24,17 +24,17 @@ wandb_log = True
 wandb_project = 'nanoGPT-SFT-Large'
 wandb_run_name = 'large-sft-run-' + str(time.time())
 
-# --- Optimizer settings (optimized for longer training) ---
-learning_rate = 5e-6  # Lower learning rate for stable fine-tuning
-max_iters = 15000     # Much longer training - multiple epochs
+# --- Optimizer settings (stabilized for loss explosion prevention) ---
+learning_rate = 1e-6  # Reduced from 5e-6 to prevent loss spikes
+max_iters = 5000     # Much longer training - multiple epochs
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
-grad_clip = 1.0
+grad_clip = 0.5       # Reduced from 1.0 for more aggressive gradient clipping
 decay_lr = True
-warmup_iters = 500    # Longer warmup for extended training
-lr_decay_iters = 12000 # Decay over most of training
-min_lr = 5e-7         # Proportional minimum learning rate
+warmup_iters = 1000   # Increased from 500 for more stable warmup
+lr_decay_iters = 10000 # Start decay earlier to avoid instabilities
+min_lr = 1e-7         # Reduced proportionally
 
 # --- Hardware compatibility ---
 compile = False  # Keep disabled for stability in multi-GPU
