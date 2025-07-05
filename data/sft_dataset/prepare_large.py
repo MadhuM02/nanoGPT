@@ -1,4 +1,5 @@
 import os
+import json
 import pickle
 import numpy as np
 from datasets import load_dataset, concatenate_datasets
@@ -10,8 +11,8 @@ def prepare_large_sft_dataset():
     print("🚀 Preparing large SFT dataset...")
     
     data_dir = os.path.dirname(__file__)
-    train_txt_path = os.path.join(data_dir, 'train.txt')
-    val_txt_path = os.path.join(data_dir, 'val.txt')
+    train_jsonl_path = os.path.join(data_dir, 'train.jsonl')
+    val_jsonl_path = os.path.join(data_dir, 'val.jsonl')
     
     # Initialize lists to store all examples
     all_train_examples = []
@@ -26,8 +27,11 @@ def prepare_large_sft_dataset():
         for example in tqdm(ag_news[split], desc=f"Processing AG News {split}"):
             text = example['text']
             label = ag_class_names[example['label']]
-            formatted_text = f"Classify this news article: {text} Category: {label}"
-            examples_list.append(formatted_text)
+            # Create prompt-completion format
+            prompt = f"Classify this news article:\n{text}\nCategory:"
+            completion = f" {label}"
+            formatted_example = {"prompt": prompt, "completion": completion}
+            examples_list.append(formatted_example)
     
     # Dataset 2: IMDB Movie Reviews (sentiment classification)
     print("🎬 Loading IMDB dataset...")
@@ -44,8 +48,11 @@ def prepare_large_sft_dataset():
                 break
             text = example['text']
             label = sentiment_labels[example['label']]
-            formatted_text = f"Analyze the sentiment of this movie review: {text} Sentiment: {label}"
-            examples_list.append(formatted_text)
+            # Create prompt-completion format
+            prompt = f"Analyze the sentiment of this movie review:\n{text}\nSentiment:"
+            completion = f" {label}"
+            formatted_example = {"prompt": prompt, "completion": completion}
+            examples_list.append(formatted_example)
             count += 1
     
     # Dataset 3: Yelp Reviews (5-star rating prediction)
@@ -61,8 +68,11 @@ def prepare_large_sft_dataset():
                     break
                 text = example['text']
                 stars = example['label'] + 1  # Convert 0-4 to 1-5 stars
-                formatted_text = f"Rate this business review from 1-5 stars:\nReview: {text}\nRating: {stars} stars"
-                examples_list.append(formatted_text)
+                # Create prompt-completion format
+                prompt = f"Rate this business review from 1-5 stars:\n{text}\nRating:"
+                completion = f" {stars} stars"
+                formatted_example = {"prompt": prompt, "completion": completion}
+                examples_list.append(formatted_example)
                 count += 1
     except Exception as e:
         print(f"Warning: Could not load Yelp dataset: {e}")
@@ -80,12 +90,15 @@ def prepare_large_sft_dataset():
         for i, example in enumerate(tqdm(financial['train'], desc="Processing Financial data")):
             text = example['sentence']
             label = financial_labels[example['label']]
-            formatted_text = f"Determine the financial sentiment:\nSentence: {text}\nSentiment: {label}"
+            # Create prompt-completion format
+            prompt = f"Determine the financial sentiment:\n{text}\nSentiment:"
+            completion = f" {label}"
+            formatted_example = {"prompt": prompt, "completion": completion}
             
             if i < train_size:
-                all_train_examples.append(formatted_text)
+                all_train_examples.append(formatted_example)
             else:
-                all_val_examples.append(formatted_text)
+                all_val_examples.append(formatted_example)
     except Exception as e:
         print(f"Warning: Could not load Financial PhraseBank: {e}")
     
@@ -104,8 +117,11 @@ def prepare_large_sft_dataset():
                     break
                 text = example['text']
                 label = emotion_labels[example['label']]
-                formatted_text = f"Identify the emotion in this text:\nText: {text}\nEmotion: {label}"
-                examples_list.append(formatted_text)
+                # Create prompt-completion format
+                prompt = f"Identify the emotion in this text:\n{text}\nEmotion:"
+                completion = f" {label}"
+                formatted_example = {"prompt": prompt, "completion": completion}
+                examples_list.append(formatted_example)
                 count += 1
     except Exception as e:
         print(f"Warning: Could not load Emotion dataset: {e}")
@@ -123,12 +139,15 @@ def prepare_large_sft_dataset():
         for i, example in enumerate(tqdm(sms_spam['train'], desc="Processing SMS data")):
             text = example['sms']
             label = spam_labels[example['label']]
-            formatted_text = f"Classify this SMS message:\nMessage: {text}\nType: {label}"
+            # Create prompt-completion format
+            prompt = f"Classify this SMS message:\n{text}\nType:"
+            completion = f" {label}"
+            formatted_example = {"prompt": prompt, "completion": completion}
             
             if i < train_size:
-                all_train_examples.append(formatted_text)
+                all_train_examples.append(formatted_example)
             else:
-                all_val_examples.append(formatted_text)
+                all_val_examples.append(formatted_example)
     except Exception as e:
         print(f"Warning: Could not load SMS Spam dataset: {e}")
     
@@ -143,31 +162,34 @@ def prepare_large_sft_dataset():
     print(f"  Validation examples: {len(all_val_examples):,}")
     print(f"  Total examples: {len(all_train_examples) + len(all_val_examples):,}")
     
-    # Write to text files
-    print("💾 Writing text files...")
-    with open(train_txt_path, 'w', encoding='utf-8') as f:
-        for example in tqdm(all_train_examples, desc="Writing train file"):
-            f.write(example + '\n')
+    # Write to JSONL files
+    print("💾 Writing JSONL files...")
+    with open(train_jsonl_path, 'w', encoding='utf-8') as f:
+        for example in tqdm(all_train_examples, desc="Writing train JSONL"):
+            json.dump(example, f, ensure_ascii=False)
+            f.write('\n')
     
-    with open(val_txt_path, 'w', encoding='utf-8') as f:
-        for example in tqdm(all_val_examples, desc="Writing val file"):
-            f.write(example + '\n')
+    with open(val_jsonl_path, 'w', encoding='utf-8') as f:
+        for example in tqdm(all_val_examples, desc="Writing val JSONL"):
+            json.dump(example, f, ensure_ascii=False)
+            f.write('\n')
     
     # --- Tokenization ---
     print("🔤 Tokenizing data...")
     enc = tiktoken.get_encoding("gpt2")
     
-    def tokenize_file(path):
+    def tokenize_jsonl_file(path):
         with open(path, 'r', encoding='utf-8') as f:
-            data = f.read()
+            lines = f.readlines()
         
-        # Split into individual examples and limit sequence length
-        examples = data.strip().split('\n')  # Examples are separated by single newlines
         tokenized_examples = []
         
-        for example in examples:
-            if example.strip():  # Skip empty examples
-                tokens = enc.encode_ordinary(example.strip())
+        for line in lines:
+            if line.strip():  # Skip empty lines
+                example = json.loads(line.strip())
+                # Combine prompt and completion
+                full_text = example['prompt'] + example['completion']
+                tokens = enc.encode_ordinary(full_text)
                 if len(tokens) > 500:  # Leave room for padding/special tokens
                     # Truncate long sequences
                     tokens = tokens[:500]
@@ -177,9 +199,9 @@ def prepare_large_sft_dataset():
         return tokenized_examples
     
     print("Tokenizing training data...")
-    train_ids = tokenize_file(train_txt_path)
+    train_ids = tokenize_jsonl_file(train_jsonl_path)
     print("Tokenizing validation data...")
-    val_ids = tokenize_file(val_txt_path)
+    val_ids = tokenize_jsonl_file(val_jsonl_path)
     
     print(f"📈 Tokenization Results:")
     print(f"  Train tokens: {len(train_ids):,}")
@@ -222,8 +244,8 @@ def prepare_large_sft_dataset():
     print(f"  - train.bin ({len(train_ids):,} tokens)")
     print(f"  - val.bin ({len(val_ids):,} tokens)")
     print(f"  - meta.pkl (metadata)")
-    print(f"  - train.txt ({len(all_train_examples):,} examples)")
-    print(f"  - val.txt ({len(all_val_examples):,} examples)")
+    print(f"  - train.jsonl ({len(all_train_examples):,} examples)")
+    print(f"  - val.jsonl ({len(all_val_examples):,} examples)")
     
     # Estimate training time
     tokens_per_iter = 8 * 256  # batch_size * block_size from config

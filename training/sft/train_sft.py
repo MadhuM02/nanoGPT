@@ -255,6 +255,9 @@ if init_from == 'resume' and checkpoint is not None:
         iter_num = 0  # Reset iteration if optimizer couldn't be loaded
 
 checkpoint = None # free up memory
+# restting as we ar reloading pretrained model
+iter_num = 0 
+best_val_loss = 1e9
 
 # compile the model
 if compile:

@@ -5,6 +5,7 @@ Contains data loading, batch processing, loss analysis, and training utilities s
 
 import os
 import math
+import random
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -22,22 +23,45 @@ class SFTDataManager:
         self.enc = tiktoken.get_encoding(tokenizer_name)
         
     def load_examples(self, master_process: bool = True) -> None:
-        """Load all examples from text files."""
+        """Load all examples from JSONL files."""
         # Load training examples
-        train_path = os.path.join(self.data_dir, 'train.txt')
+        train_path = os.path.join(self.data_dir, 'train.jsonl')
         if os.path.exists(train_path):
-            with open(train_path, 'r', encoding='utf-8') as f:
-                self.train_examples = [line.strip() for line in f if line.strip()]
+            self.train_examples = self._load_jsonl_examples(train_path)
         
         # Load validation examples  
-        val_path = os.path.join(self.data_dir, 'val.txt')
+        val_path = os.path.join(self.data_dir, 'val.jsonl')
         if os.path.exists(val_path):
-            with open(val_path, 'r', encoding='utf-8') as f:
-                self.val_examples = [line.strip() for line in f if line.strip()]
+            self.val_examples = self._load_jsonl_examples(val_path)
         
         # Only master process should print to avoid spam in distributed training
         if master_process:
             print(f"📚 Loaded {len(self.train_examples)} training examples, {len(self.val_examples)} validation examples")
+            if len(self.train_examples) > 0:
+                print(f"📋 First training example type: {type(self.train_examples[0])}")
+                print(f"📋 First training example: {self.train_examples[0]}")
+            if len(self.val_examples) > 0:
+                print(f"📋 First validation example type: {type(self.val_examples[0])}")
+                print(f"📋 First validation example: {self.val_examples[0]}")
+    
+    def _load_jsonl_examples(self, file_path: str) -> list:
+        """Load examples from JSONL file."""
+        examples = []
+        
+        import json
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:  # Skip empty lines
+                    example = json.loads(line)
+                    # Store the original prompt and completion separately for better control
+                    examples.append({
+                        'prompt': example['prompt'],
+                        'completion': example['completion'],
+                        'full_text': example['prompt'] + example['completion']  # Combined for convenience
+                    })
+        
+        return examples
     
     def get_batch(self, split: str, batch_size: int, block_size: int, 
                   device: str, device_type: str) -> Tuple[torch.Tensor, ...]:
@@ -62,15 +86,20 @@ class SFTDataManager:
                 x, y = x.to(device), y.to(device)
             return x, y
         else:
-            # Sample random examples
-            sampled_examples = np.random.choice(examples, size=batch_size, replace=True)
+            # Sample random examples using Python's random module to avoid numpy string issues
+            sampled_examples = random.choices(examples, k=batch_size)
             
             x_list = []
             y_list = []
             instruction_masks = []  # Track instruction vs response regions
             
             for example in sampled_examples:
-                x_tokens, y_tokens, instruction_mask = self._process_example(example, block_size)
+                # Extract prompt and completion from the JSONL format
+                prompt = example['prompt']
+                completion = example['completion']
+                full_text = example['full_text']
+                
+                x_tokens, y_tokens, instruction_mask = self._process_jsonl_example(prompt, completion, block_size)
                 x_list.append(torch.tensor(x_tokens, dtype=torch.int64))
                 y_list.append(torch.tensor(y_tokens, dtype=torch.int64))
                 instruction_masks.append(torch.tensor(instruction_mask, dtype=torch.float32))
@@ -102,11 +131,125 @@ class SFTDataManager:
                 loss_mask = loss_mask.to(device)
                 return x, y_masked, loss_mask
     
+    def _process_jsonl_example(self, prompt: str, completion: str, block_size: int) -> Tuple[List[int], List[int], List[float]]:
+        """Process a JSONL example with separated prompt and completion."""
+        # Tokenize prompt and completion separately for precise control
+        prompt_tokens = self.enc.encode_ordinary(prompt)
+        completion_tokens = self.enc.encode_ordinary(completion)
+        
+        # Combine tokens for the full sequence
+        full_tokens = prompt_tokens + completion_tokens
+        
+        # Add end token to mark end of sequence (this is part of the actual completion)
+        full_tokens = full_tokens + [self.enc.eot_token]
+        original_length = len(full_tokens)
+        
+        # Create instruction mask aligned with the TARGET tokens (Y)
+        # Since Y = tokens[1:], we need to align the mask accordingly
+        prompt_length = len(prompt_tokens)
+        
+        # Create mask for the full sequence first
+        # 1 = prompt/instruction (mask loss), 0 = completion/response (compute loss)
+        full_mask = [1] * prompt_length + [0] * (original_length - prompt_length)
+        
+        # Ensure we have at least one token
+        if len(full_tokens) == 0:
+            full_tokens = [self.enc.eot_token]
+            full_mask = [0]  # Single token is treated as completion
+            original_length = 1
+        
+        # Truncate or pad to exactly block_size + 1 (since we'll shift)
+        target_length = block_size + 1
+        if len(full_tokens) >= target_length:
+            full_tokens = full_tokens[:target_length]
+            full_mask = full_mask[:target_length]
+        else:
+            # Pad with end tokens to reach target_length
+            pad_length = target_length - len(full_tokens)
+            full_tokens = full_tokens + [self.enc.eot_token] * pad_length
+            # IMPORTANT: Padding tokens should be masked (not contribute to loss)
+            full_mask = full_mask + [1] * pad_length  # 1 = mask loss for padding
+        
+        # Create input (x) and target (y) sequences
+        # Standard language modeling: predict next token
+        x_tokens = full_tokens[:-1]  # Input sequence (first block_size tokens)
+        y_tokens = full_tokens[1:]   # Target sequence (shifted by 1)
+        instruction_mask = full_mask[1:]  # Mask aligned with Y tokens
+        
+        # Ensure exactly block_size for all
+        x_tokens = x_tokens[:block_size]
+        y_tokens = y_tokens[:block_size]
+        instruction_mask = instruction_mask[:block_size]
+        
+        # Final safety check - pad if somehow still short and mask padding
+        while len(x_tokens) < block_size:
+            x_tokens.append(self.enc.eot_token)
+        while len(y_tokens) < block_size:
+            y_tokens.append(self.enc.eot_token)
+        while len(instruction_mask) < block_size:
+            instruction_mask.append(1)  # 1 = mask loss for any additional padding
+        
+        return x_tokens, y_tokens, instruction_mask
+
+    def _process_example_with_prompt(self, example_str: str, prompt: str, block_size: int) -> Tuple[List[int], List[int], List[float]]:
+        """Process a single example with separated prompt and completion."""
+        # Tokenize the full example
+        tokens = self.enc.encode_ordinary(example_str)
+        
+        # Tokenize just the prompt to find the boundary
+        prompt_tokens = self.enc.encode_ordinary(prompt)
+        prompt_token_end = len(prompt_tokens)
+        
+        # Ensure we have at least one token
+        if len(tokens) == 0:
+            tokens = [self.enc.eot_token]
+        
+        # Add end token to mark end of sequence
+        tokens = tokens + [self.enc.eot_token]
+        
+        # Create instruction mask (1 for instruction/prompt, 0 for response/completion)
+        instruction_mask = [1] * len(tokens)
+        if prompt_token_end > 0 and prompt_token_end < len(tokens):
+            # Mark response tokens (everything after the prompt)
+            for i in range(prompt_token_end, len(tokens)):
+                instruction_mask[i] = 0
+        
+        # Truncate or pad to exactly block_size
+        if len(tokens) >= block_size:
+            # Truncate to exactly block_size
+            tokens = tokens[:block_size]
+            instruction_mask = instruction_mask[:block_size]
+        else:
+            # Pad with end tokens to reach block_size
+            pad_length = block_size - len(tokens)
+            tokens = tokens + [self.enc.eot_token] * pad_length
+            instruction_mask = instruction_mask + [1] * pad_length  # Mask padding tokens
+        
+        # Create input (x) and target (y) sequences
+        x_tokens = tokens[:]  # Copy the full sequence
+        y_tokens = tokens[1:] + [self.enc.eot_token]  # Shift by 1 and add eot at end
+        
+        # Ensure exactly block_size for both
+        x_tokens = x_tokens[:block_size]
+        y_tokens = y_tokens[:block_size]
+        instruction_mask = instruction_mask[:block_size]
+        
+        # Final safety check - pad if somehow still short and mask padding
+        while len(x_tokens) < block_size:
+            x_tokens.append(self.enc.eot_token)
+        while len(y_tokens) < block_size:
+            y_tokens.append(self.enc.eot_token)
+        while len(instruction_mask) < block_size:
+            instruction_mask.append(1)  # Mask any additional padding
+        
+        return x_tokens, y_tokens, instruction_mask
+
     def _process_example(self, example: str, block_size: int) -> Tuple[List[int], List[int], List[float]]:
         """Process a single example into tokenized sequences with instruction/response masking."""
         # Detect instruction-response boundary markers
         # Common patterns: "Category:", "Sentiment:", "Summary:", etc.
-        response_markers = ["Category:", "Sentiment:", "Summary:", "Answer:", "Translation:", "Output:"]
+        response_markers = ["Category:", "Sentiment:", "Summary:", "Answer:", "Translation:", "Output:", 
+                           "Rating:", "Emotion:", "Type:", "Classification:", "Result:"]
         
         # Find the first response marker
         instruction_end = -1
@@ -150,7 +293,7 @@ class SFTDataManager:
             # Pad with end tokens to reach block_size
             pad_length = block_size - len(tokens)
             tokens = tokens + [self.enc.eot_token] * pad_length
-            instruction_mask = instruction_mask + [0] * pad_length  # Padding is response-like
+            instruction_mask = instruction_mask + [1] * pad_length  # Mask padding tokens
         
         # Create input (x) and target (y) sequences
         # x: tokens[:-1], y: tokens[1:]
@@ -163,13 +306,13 @@ class SFTDataManager:
         y_tokens = y_tokens[:block_size]
         instruction_mask = instruction_mask[:block_size]
         
-        # Final safety check - pad if somehow still short
+        # Final safety check - pad if somehow still short and mask padding
         while len(x_tokens) < block_size:
             x_tokens.append(self.enc.eot_token)
         while len(y_tokens) < block_size:
             y_tokens.append(self.enc.eot_token)
         while len(instruction_mask) < block_size:
-            instruction_mask.append(0)
+            instruction_mask.append(1)  # Mask any additional padding
         
         return x_tokens, y_tokens, instruction_mask
 
@@ -215,18 +358,18 @@ class SFTLossAnalyzer:
             y_invalid = np.sum((y_sample < 0) | (y_sample >= self.enc.n_vocab))
             
             print(f"\n   Sample {i}:")
-            print(f"     X tokens: {x_sample[:10].tolist()}...{x_sample[-10:].tolist()}")
-            print(f"     Y tokens: {y_sample[:10].tolist()}...{y_sample[-10:].tolist()}")
-            print(f"     Invalid X tokens: {x_invalid}, Invalid Y tokens: {y_invalid}")
+            # print(f"     X tokens: {x_sample[:10].tolist()}...{x_sample[-10:].tolist()}")
+            # print(f"     Y tokens: {y_sample[:10].tolist()}...{y_sample[-10:].tolist()}")
+            # print(f"     Invalid X tokens: {x_invalid}, Invalid Y tokens: {y_invalid}")
             
             if loss_per_sample is not None:
                 print(f"     Sample loss: {loss_per_sample[i].item():.4f}")
             
             # Try to decode samples (handle potential encoding errors)
+            x_text = self.enc.decode([x for x in x_sample.tolist() if x >= 0 and x != self.enc.eot_token]) 
+            print(f"     X text: {repr(x_text)}")
             try:
-                x_text = self.enc.decode(x_sample.tolist()[:50])  # First 50 tokens
-                y_text = self.enc.decode(y_sample.tolist()[:50])
-                print(f"     X text: {repr(x_text)}")
+                y_text = self.enc.decode([y for y in y_sample.tolist() if y >=0 and y != self.enc.eot_token])
                 print(f"     Y text: {repr(y_text)}")
             except Exception as e:
                 print(f"     Decode error: {e}")
