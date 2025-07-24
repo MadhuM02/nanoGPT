@@ -10,3 +10,9 @@ __pycache__/
 input.txt
 env/
 venv/
+wandb/
+nohup*
+*.txt
+checkpoints/
+*.jsonl
+*.log

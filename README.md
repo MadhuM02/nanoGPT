@@ -25,6 +25,53 @@ Dependencies:
 -  `wandb` for optional logging <3
 -  `tqdm` for progress bars <3
 
+## project organization
+
+This repository is organized into logical directories for easy navigation and development:
+
+### 📁 Core Directories
+
+- **`training/`** - All training scripts organized by type
+  - `standard/` - Standard GPT training (`train.py`)
+  - `moe/` - Mixture-of-Experts training and utilities
+  - `sft/` - Supervised Fine-Tuning scripts and tools
+  - `utils/` - Training utilities (`configurator.py`, `bench.py`)
+
+- **`sampling/`** - Text generation scripts
+  - `sample.py` - Standard text generation
+  - `sample_moe.py` - MoE model sampling
+
+- **`tests/`** - Comprehensive test suite
+  - `sft/` - SFT functionality tests
+  - `kv_cache/` - KV cache tests
+  - `memory/` - Memory management tests
+  - `moe/` - MoE functionality tests
+  - `distributed/` - Multi-GPU training tests
+  - `utils/` - Test utilities and runners
+
+- **`config/`** - Training configurations
+- **`data/`** - Dataset preparation scripts
+- **`docs/`** - Documentation and guides
+
+### 🚀 Quick Commands
+
+```bash
+# Standard training
+python training/standard/train.py config/train_shakespeare_char.py
+
+# MoE training  
+python training/moe/train_moe_advanced.py
+
+# SFT training
+python training/sft/train_sft.py config/sft_config.py
+
+# Text generation
+python sampling/sample.py --out_dir=checkpoints/out-shakespeare-char
+
+# Run all tests
+python tests/utils/run_tests.py
+```
+
 ## quick start
 
 If you are not a deep learning professional and you just want to feel the magic and get your feet wet, the fastest way to get started is to train a character-level GPT on the works of Shakespeare. First, we download it as a single (1MB) file and turn it from raw text into one large stream of integers:
@@ -38,13 +85,13 @@ This creates a `train.bin` and `val.bin` in that data directory. Now it is time 
 **I have a GPU**. Great, we can quickly train a baby GPT with the settings provided in the [config/train_shakespeare_char.py](config/train_shakespeare_char.py) config file:
 
 ```sh
-python train.py config/train_shakespeare_char.py
+python training/standard/train.py config/train_shakespeare_char.py
 ```
 
-If you peek inside it, you'll see that we're training a GPT with a context size of up to 256 characters, 384 feature channels, and it is a 6-layer Transformer with 6 heads in each layer. On one A100 GPU this training run takes about 3 minutes and the best validation loss is 1.4697. Based on the configuration, the model checkpoints are being written into the `--out_dir` directory `out-shakespeare-char`. So once the training finishes we can sample from the best model by pointing the sampling script at this directory:
+If you peek inside it, you'll see that we're training a GPT with a context size of up to 256 characters, 384 feature channels, and it is a 6-layer Transformer with 6 heads in each layer. On one A100 GPU this training run takes about 3 minutes and the best validation loss is 1.4697. Based on the configuration, the model checkpoints are being written into the `--out_dir` directory `checkpoints/out-shakespeare-char`. So once the training finishes we can sample from the best model by pointing the sampling script at this directory:
 
 ```sh
-python sample.py --out_dir=out-shakespeare-char
+python sampling/sample.py --out_dir=checkpoints/out-shakespeare-char
 ```
 
 This generates a few samples, for example:
@@ -75,13 +122,13 @@ lol  `¯\_(ツ)_/¯`. Not bad for a character-level model after 3 minutes of tra
 **I only have a macbook** (or other cheap computer). No worries, we can still train a GPT but we want to dial things down a notch. I recommend getting the bleeding edge PyTorch nightly ([select it here](https://pytorch.org/get-started/locally/) when installing) as it is currently quite likely to make your code more efficient. But even without it, a simple train run could look as follows:
 
 ```sh
-python train.py config/train_shakespeare_char.py --device=cpu --compile=False --eval_iters=20 --log_interval=1 --block_size=64 --batch_size=12 --n_layer=4 --n_head=4 --n_embd=128 --max_iters=2000 --lr_decay_iters=2000 --dropout=0.0
+python training/standard/train.py config/train_shakespeare_char.py --device=cpu --compile=False --eval_iters=20 --log_interval=1 --block_size=64 --batch_size=12 --n_layer=4 --n_head=4 --n_embd=128 --max_iters=2000 --lr_decay_iters=2000 --dropout=0.0
 ```
 
 Here, since we are running on CPU instead of GPU we must set both `--device=cpu` and also turn off PyTorch 2.0 compile with `--compile=False`. Then when we evaluate we get a bit more noisy but faster estimate (`--eval_iters=20`, down from 200), our context size is only 64 characters instead of 256, and the batch size only 12 examples per iteration, not 64. We'll also use a much smaller Transformer (4 layers, 4 heads, 128 embedding size), and decrease the number of iterations to 2000 (and correspondingly usually decay the learning rate to around max_iters with `--lr_decay_iters`). Because our network is so small we also ease down on regularization (`--dropout=0.0`). This still runs in about ~3 minutes, but gets us a loss of only 1.88 and therefore also worse samples, but it's still good fun:
 
 ```sh
-python sample.py --out_dir=out-shakespeare-char --device=cpu
+python sampling/sample.py --out_dir=checkpoints/out-shakespeare-char --device=cpu
 ```
 Generates samples like this:
 
@@ -211,6 +258,24 @@ Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started
 - Separate out the optim buffers from model params in checkpoints I think
 - Additional logging around network health (e.g. gradient clip events, magnitudes)
 - Few more investigations around better init etc.
+
+## documentation
+
+📚 **Comprehensive documentation is available in the [`docs/`](docs/) directory:**
+
+- **[docs/guides/MODEL_ARCHITECTURE.md](docs/guides/MODEL_ARCHITECTURE.md)** - Complete model architecture guide with V100 configurations
+- **[docs/guides/SAMPLING_GUIDE.md](docs/guides/SAMPLING_GUIDE.md)** - Complete guide to sampling from trained models
+- **[docs/guides/OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - Performance optimization strategies
+- **[docs/guides/TEST_ORGANIZATION.md](docs/guides/TEST_ORGANIZATION.md)** - Test suite organization and usage
+- **[docs/fixes/](docs/fixes/)** - Solutions for common issues (checkpoints, memory, etc.)
+- **[docs/integration/](docs/integration/)** - Third-party integrations (Weights & Biases, etc.)
+
+🔗 **Quick Links:**
+- Understanding the model architecture? → [MODEL_ARCHITECTURE.md](docs/guides/MODEL_ARCHITECTURE.md)
+- Having checkpoint loading issues? → [CHECKPOINT_FIX.md](docs/fixes/CHECKPOINT_FIX.md)
+- Memory problems? → [OOM_SOLUTION.md](docs/fixes/OOM_SOLUTION.md)  
+- Want to track experiments? → [WANDB_INTEGRATION.md](docs/integration/WANDB_INTEGRATION.md)
+- Running tests? → [TEST_ORGANIZATION.md](docs/guides/TEST_ORGANIZATION.md)
 
 ## troubleshooting
 
